@@ -1,0 +1,61 @@
+name: Release
+
+# Pushing a tag like v0.2.0 tests, builds and publishes a release.
+# Running the workflow by hand does the same build and attaches the zip to the run instead.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Test
+        run: swift test
+
+      - name: Build
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            label="$version"
+          else
+            version="0.0.0"
+            label="dev-$GITHUB_RUN_NUMBER"
+          fi
+          scripts/build-app.sh "$version" "$GITHUB_RUN_NUMBER"
+          zip="Ollameter-$label.zip"
+          ditto -c -k --keepParent build/Ollameter.app "$zip"
+          shasum -a 256 "$zip" > "$zip.sha256"
+          cat "$zip.sha256"
+          echo "ZIP=$zip" >> "$GITHUB_ENV"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Attach build to the run
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ZIP }}
+          path: |
+            ${{ env.ZIP }}
+            ${{ env.ZIP }}.sha256
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=(--title "Ollameter $VERSION" --generate-notes)
+          if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" "$ZIP" "$ZIP.sha256"
