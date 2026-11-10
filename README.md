@@ -52,3 +52,7 @@ Two flags help when changing the UI:
 ## Releases
 
 Push a tag such as `v0.2.0` and the Release workflow tests, builds and publishes it. A tag with a hyphen, such as `v0.2.0-beta.1`, becomes a prerelease. Running the workflow by hand from the Actions tab does the same build and attaches the zip to the run without publishing anything.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
