@@ -23,7 +23,13 @@
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_ollameter._tcp</string>
+    </array>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Ollameter shows the Ollama stats of other Macs on your network, and shares this Mac's when you turn on Share on Local Network.</string>
 </dict>
 </plist>

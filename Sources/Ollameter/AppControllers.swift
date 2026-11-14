@@ -4,14 +4,22 @@ import SwiftUI
 
 @MainActor
 final class StatusItemController: NSObject {
+    private struct Shown: Equatable {
+        var display: DisplayState
+        var host: String?
+        var appearance: NSAppearance.Name?
+    }
+
     private(set) var item: NSStatusItem
-    private var lastPresentation: DisplayState?
-    private var lastAppearance: NSAppearance.Name?
+    private var lastShown: Shown?
+    private weak var openMenu: NSMenu?
+    private let hub: MeterHub
     private let isPanelVisible: () -> Bool
     private let togglePanel: () -> Void
 
-    init(isPanelVisible: @escaping () -> Bool, togglePanel: @escaping () -> Void) {
+    init(hub: MeterHub, isPanelVisible: @escaping () -> Bool, togglePanel: @escaping () -> Void) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        self.hub = hub
         self.isPanelVisible = isPanelVisible
         self.togglePanel = togglePanel
         super.init()
@@ -22,16 +30,42 @@ final class StatusItemController: NSObject {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
-    func update(_ presentation: DisplayState) {
+    func update(_ model: MeterViewModel) {
         guard let button = item.button else { return }
         let appearance = button.effectiveAppearance
-        let appearanceName = appearance.bestMatch(from: [.darkAqua, .aqua])
-        guard presentation != lastPresentation || appearanceName != lastAppearance else { return }
-        lastPresentation = presentation
-        lastAppearance = appearanceName
+        let shown = Shown(
+            display: model.display, host: model.remote?.host,
+            appearance: appearance.bestMatch(from: [.darkAqua, .aqua]))
+        guard shown != lastShown else { return }
+        lastShown = shown
+        let presentation = model.display
         button.image = MenuBarRenderer.image(for: presentation, appearance: appearance)
-        button.toolTip = presentation.summary
-        button.setAccessibilityLabel("Ollama: \(presentation.summary)")
+        if let remote = model.remote {
+            // A connection problem's summary already names the Mac.
+            let summary = remote.problem ?? "\(remote.host): \(presentation.summary)"
+            button.toolTip = summary
+            button.setAccessibilityLabel("Ollama on \(remote.host): \(remote.problem ?? presentation.summary)")
+        } else {
+            button.toolTip = presentation.summary
+            button.setAccessibilityLabel("Ollama: \(presentation.summary)")
+        }
+    }
+
+    /// The menu's items as text, for the self-test.
+    func menuSnapshot() -> [String] {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        populate(menu)
+        return menu.items.map { item in
+            if item.isSeparatorItem { return "---" }
+            let mark = item.state == .on ? "[x] " : item.action == nil && !item.isSectionHeader ? "(disabled) " : ""
+            return mark + item.title
+        }
+    }
+
+    /// Rebuilds the menu while it's open, as Macs are found or sharing starts.
+    func networkChanged() {
+        if let openMenu { populate(openMenu) }
     }
 
     @objc private func clicked() {
@@ -44,20 +78,107 @@ final class StatusItemController: NSObject {
     }
 
     private func showMenu() {
+        hub.browser.start()
         let menu = NSMenu()
-        let toggle = NSMenuItem(
-            title: isPanelVisible() ? "Hide Window" : "Show Window", action: #selector(toggleFromMenu), keyEquivalent: "")
-        toggle.target = self
-        menu.addItem(toggle)
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit Ollameter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.autoenablesItems = false
+        populate(menu)
+        openMenu = menu
         item.menu = menu
         item.button?.performClick(nil)
         item.menu = nil
+        openMenu = nil
+    }
+
+    private func populate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        menu.addItem(action(isPanelVisible() ? "Hide Window" : "Show Window", #selector(toggleFromMenu)))
+        menu.addItem(.separator())
+
+        menu.addItem(.sectionHeader(title: "Show Stats From"))
+        menu.addItem(sourceItem(.local))
+        var listed: [MeterSource] = [.local]
+        for name in hub.peers {
+            let source = MeterSource.service(name: name)
+            menu.addItem(sourceItem(source))
+            listed.append(source)
+        }
+        // The Mac being followed stays listed while Bonjour can't see it, or when it was typed in.
+        if !listed.contains(hub.source) {
+            menu.addItem(sourceItem(hub.source))
+        }
+        if hub.peers.isEmpty {
+            let none = NSMenuItem(title: "No other Macs found sharing", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        }
+        menu.addItem(action("Other Mac…", #selector(enterAddress)))
+        menu.addItem(.separator())
+
+        let sharing = action("Share on Local Network", #selector(toggleSharing))
+        sharing.state = hub.isSharing ? .on : .off
+        sharing.toolTip = "Lets other Macs on this network watch this one's stats. They can't change anything here."
+        menu.addItem(sharing)
+        if let status = hub.sharingStatus {
+            let line = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+            line.isEnabled = false
+            menu.addItem(line)
+        }
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit Ollameter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    private func action(_ title: String, _ selector: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+        item.target = self
+        return item
+    }
+
+    private func sourceItem(_ source: MeterSource) -> NSMenuItem {
+        let item = action(source.displayName, #selector(chooseSource(_:)))
+        item.representedObject = source.storageValue
+        item.state = source == hub.source ? .on : .off
+        return item
     }
 
     @objc private func toggleFromMenu() {
         togglePanel()
+    }
+
+    @objc private func chooseSource(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String, let source = MeterSource(storageValue: value) else { return }
+        hub.select(source)
+    }
+
+    @objc private func toggleSharing() {
+        hub.setSharing(!hub.isSharing)
+    }
+
+    @objc private func enterAddress() {
+        var text = ""
+        if case .address = hub.source { text = hub.source.displayName }
+        var problem: String?
+        while true {
+            let alert = NSAlert()
+            alert.messageText = problem ?? "Watch Another Mac"
+            alert.informativeText =
+                "Enter the name or IP address of a Mac that has Share on Local Network turned on, such as "
+                + "studio.local or 192.168.1.20. Add a port after a colon if it isn't \(MeterSource.defaultPort)."
+            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+            field.placeholderString = "studio.local"
+            field.stringValue = text
+            alert.accessoryView = field
+            alert.addButton(withTitle: "Connect")
+            alert.addButton(withTitle: "Cancel")
+            alert.window.initialFirstResponder = field
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            text = field.stringValue
+            if let source = MeterSource.address(text) {
+                hub.select(source)
+                return
+            }
+            problem = "That isn't a name or address Ollameter can use."
+        }
     }
 }
 
@@ -73,10 +194,10 @@ final class PanelController: NSObject, NSWindowDelegate {
     private static let screenMargin: CGFloat = 12
 
     let panel: NSPanel
-    private let monitor: Monitor
+    private let hub: MeterHub
 
-    init(monitor: Monitor) {
-        self.monitor = monitor
+    init(hub: MeterHub) {
+        self.hub = hub
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: MeterLayout.width, height: 600),
             styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
@@ -97,7 +218,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
 
         let root = MeterWindowRoot(
-            monitor: monitor,
+            hub: hub,
             onClose: { [weak self] in self?.setVisible(false) },
             onHeightChange: { [weak self] height in self?.fit(height: height) })
         let host = FirstMouseHostingView(rootView: root)
@@ -127,7 +248,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     private func setVisible(_ visible: Bool) {
-        monitor.wantsDetail = visible
+        hub.isPanelVisible = visible
         UserDefaults.standard.set(visible, forKey: Self.visibleKey)
         if visible {
             panel.orderFrontRegardless()
@@ -148,37 +269,45 @@ final class PanelController: NSObject, NSWindowDelegate {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let selfTestDirectory: URL?
-    private let selfTestSeconds: Double
-    private let selfTestUnloadModel: String?
-    private var monitor: Monitor?
+    struct Options {
+        var selfTestDirectory: URL?
+        var selfTestSeconds: Double = 8
+        var selfTestUnloadModel: String?
+        /// For this run only: whose numbers to show, and whether to share.
+        var source: MeterSource?
+        var sharing: Bool?
+    }
+
+    private let options: Options
+    private var hub: MeterHub?
     private var panelController: PanelController?
     private var statusController: StatusItemController?
 
-    init(selfTestDirectory: URL?, selfTestSeconds: Double, selfTestUnloadModel: String?) {
-        self.selfTestDirectory = selfTestDirectory
-        self.selfTestSeconds = selfTestSeconds
-        self.selfTestUnloadModel = selfTestUnloadModel
+    init(options: Options) {
+        self.options = options
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let monitor = Monitor()
-        let panelController = PanelController(monitor: monitor)
+        let hub = MeterHub(monitor: Monitor(), sourceOverride: options.source, sharingOverride: options.sharing)
+        let panelController = PanelController(hub: hub)
         let statusController = StatusItemController(
+            hub: hub,
             isPanelVisible: { [weak panelController] in panelController?.isVisible ?? false },
             togglePanel: { [weak panelController] in panelController?.toggle() })
-        monitor.onUpdate = { [weak statusController] model in statusController?.update(model.display) }
-        self.monitor = monitor
+        hub.onUpdate = { [weak statusController] model in statusController?.update(model) }
+        hub.onNetworkChange = { [weak statusController] in statusController?.networkChanged() }
+        self.hub = hub
         self.panelController = panelController
         self.statusController = statusController
 
         panelController.restoreVisibility()
-        monitor.start()
+        hub.start()
 
-        if let selfTestDirectory {
+        if let directory = options.selfTestDirectory {
             SelfTest.schedule(
-                directory: selfTestDirectory, seconds: selfTestSeconds, unloadModel: selfTestUnloadModel, monitor: monitor,
-                panel: panelController.panel, statusItem: statusController.item)
+                directory: directory, seconds: options.selfTestSeconds, unloadModel: options.selfTestUnloadModel,
+                hub: hub, panel: panelController.panel, statusItem: statusController.item,
+                menu: { [weak statusController] in statusController?.menuSnapshot() ?? [] })
         }
     }
 }

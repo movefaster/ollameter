@@ -1,7 +1,7 @@
 import Foundation
 
-public struct DisplayState: Equatable, Sendable {
-    public enum Tint: Sendable { case none, muted, gpu, prompt }
+public struct DisplayState: Equatable, Sendable, Codable {
+    public enum Tint: String, Sendable, Codable { case none, muted, gpu, prompt }
 
     public var fraction: Double
     public var tint: Tint

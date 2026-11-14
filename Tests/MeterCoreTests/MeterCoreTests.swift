@@ -612,3 +612,149 @@ final class LogTailerTests: XCTestCase {
         XCTAssertEqual(tailer.readNew(), [])
     }
 }
+
+final class SharingTests: XCTestCase {
+    private func sampleModel() -> MeterViewModel {
+        var model = MeterViewModel()
+        // Whole seconds, so dates survive the trip exactly.
+        model.now = Date(timeIntervalSince1970: 1_800_000_000)
+        model.snapshot.phase = .generating
+        model.snapshot.liveTPS = 27.4
+        model.snapshot.generatedTokens = 321
+        model.version = "0.40.16"
+        model.models = [
+            LoadedModel(
+                name: "llama3.2:3b", size: 2_000_000_000, sizeVRAM: 2_000_000_000, contextLength: 8192,
+                expiresAt: Date(timeIntervalSince1970: 1_800_000_300), parameterSize: "3.2B", quantization: "Q4_K_M")
+        ]
+        var stats = SessionStats()
+        for index in 0..<14 {
+            let request = CompletedRequest(
+                sequence: index, task: 100 + index, finishedAt: Date(timeIntervalSince1970: 1_799_999_000 + Double(index)),
+                promptTokens: 4_000, evaluatedTokens: 300, promptMilliseconds: 900, promptTPS: 333,
+                generatedTokens: 200, generationMilliseconds: 7_000, generationTPS: 28.5)
+            stats.record(request)
+            model.requests.insert(request, at: 0)
+        }
+        model.stats = stats
+        model.notices = [Notice(id: "n", severity: .serious, text: "A notice.", at: model.now)]
+        model.hardware.gpuUtilization = 97
+        model.hardware.memoryPressure = .warning
+        model.runner = RunnerStats(cpuPercent: 12, residentBytes: 3_000_000_000)
+        model.promptCache = PromptCacheState(limitBytes: 1 << 30, usedBytes: 1 << 29, savedPrompts: 2, savedTokens: [9, 8])
+        model.display = DisplayState(
+            fraction: 0.97, tint: .gpu, modelLoaded: true, text: "27 t/s", textDimmed: false,
+            summary: "Generating", displayPhase: .generating, heldTPS: 27)
+        model.tpsHistory = [0, 26.5, 27.4]
+        model.gpuHistory = [3, 97]
+        return model
+    }
+
+    func testFrameRoundTripKeepsEverythingShown() throws {
+        var model = sampleModel()
+        model.unload = .confirming(model: "llama3.2:3b")
+        model.remote = RemoteSource(host: "elsewhere", status: .connected)
+        let data = try XCTUnwrap(SharedFrame(host: "studio", app: "0.2.0", model: model).encoded())
+        guard case .success(let frame) = SharedFrame.decode(data) else { return XCTFail("didn't decode") }
+
+        XCTAssertEqual(frame.host, "studio")
+        XCTAssertEqual(frame.app, "0.2.0")
+        var expected = model
+        expected.requests = Array(model.requests.prefix(SharedFrame.requestLimit))
+        // The receiving Mac's own button and source aren't the sender's to set.
+        expected.unload = .ready
+        expected.remote = nil
+        XCTAssertEqual(frame.model, expected)
+        XCTAssertEqual(frame.model.stats.generation.average, model.stats.generation.average)
+        XCTAssertEqual(frame.model.stats.firstTokenAverage, model.stats.firstTokenAverage)
+    }
+
+    func testFrameIsOneLineForTheEventStream() throws {
+        var model = sampleModel()
+        model.notices = [Notice(id: "n", severity: .warning, text: "Two\nlines", at: model.now)]
+        let data = try XCTUnwrap(SharedFrame(host: "studio", app: nil, model: model).encoded())
+        XCTAssertFalse(data.contains(0x0A))
+        XCTAssertFalse(data.contains(0x0D))
+    }
+
+    func testInfiniteSpeedStillEncodes() throws {
+        var model = sampleModel()
+        model.snapshot.promptTPS = .infinity
+        let data = try XCTUnwrap(SharedFrame(host: "studio", app: nil, model: model).encoded())
+        guard case .success(let frame) = SharedFrame.decode(data) else { return XCTFail("didn't decode") }
+        XCTAssertEqual(frame.model.snapshot.promptTPS, .infinity)
+    }
+
+    func testOtherFormatIsReportedWithItsVersion() {
+        let data = Data(#"{"format":2,"app":"0.9.0","host":"studio"}"#.utf8)
+        XCTAssertEqual(SharedFrame.decode(data), .failure(.otherFormat(format: 2, app: "0.9.0")))
+        XCTAssertEqual(SharedFrame.decode(Data("nonsense".utf8)), .failure(.malformed))
+        XCTAssertEqual(SharedFrame.decode(Data(#"{"format":1,"host":"studio"}"#.utf8)), .failure(.malformed))
+    }
+
+    func testPlaceholderNamesTheProblem() {
+        let model = MeterViewModel.placeholder(for: RemoteSource(host: "studio", status: .unreachable))
+        XCTAssertEqual(model.display.displayPhase, .offline)
+        XCTAssertEqual(model.display.summary, "Can't reach studio. Trying again…")
+        XCTAssertEqual(model.remote?.host, "studio")
+        XCTAssertNil(RemoteSource(host: "studio", status: .connected).problem)
+    }
+
+    func testAddresses() {
+        XCTAssertEqual(MeterSource.address("studio.local"), .address(host: "studio.local", port: 11480))
+        XCTAssertEqual(MeterSource.address(" 192.168.1.20:9000 "), .address(host: "192.168.1.20", port: 9000))
+        XCTAssertEqual(MeterSource.address("http://studio.local:9000/v1/state"), .address(host: "studio.local", port: 9000))
+        XCTAssertEqual(MeterSource.address("[fe80::1]:9000"), .address(host: "fe80::1", port: 9000))
+        XCTAssertEqual(MeterSource.address("fe80::1"), .address(host: "fe80::1", port: 11480))
+        XCTAssertNil(MeterSource.address(""))
+        XCTAssertNil(MeterSource.address("studio local"))
+        XCTAssertNil(MeterSource.address("studio:0"))
+        XCTAssertNil(MeterSource.address("studio:99999"))
+        XCTAssertNil(MeterSource.address(":9000"))
+    }
+
+    func testSourcesSurviveStorage() {
+        let sources: [MeterSource] = [
+            .local, .service(name: "Studio (2)"), .address(host: "studio.local", port: 11480),
+            .address(host: "10.0.0.2", port: 9000), .address(host: "fe80::1", port: 9000),
+        ]
+        for source in sources {
+            XCTAssertEqual(MeterSource(storageValue: source.storageValue), source, source.storageValue)
+        }
+        XCTAssertNil(MeterSource(storageValue: "service:"))
+        XCTAssertNil(MeterSource(storageValue: "bogus"))
+        XCTAssertEqual(MeterSource.address(host: "studio", port: 11480).displayName, "studio")
+        XCTAssertEqual(MeterSource.address(host: "studio", port: 9000).displayName, "studio:9000")
+    }
+
+    func testRequestHead() {
+        XCTAssertEqual(HTTPRequestHead.parse(Data("GET /v1/state HTTP/1.1\r\nHost: x\r\n".utf8)), .incomplete)
+        XCTAssertEqual(
+            HTTPRequestHead.parse(Data("GET /v1/events?x=1 HTTP/1.1\r\nHost: x\r\n\r\n".utf8)),
+            .complete(HTTPRequestHead(method: "GET", path: "/v1/events")))
+        XCTAssertEqual(HTTPRequestHead.parse(Data("hello there\r\n\r\n".utf8)), .malformed)
+        XCTAssertEqual(HTTPRequestHead.parse(Data(repeating: 0x41, count: HTTPRequestHead.sizeLimit + 1)), .malformed)
+    }
+
+    func testEventStreamAcrossChunks() throws {
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+            + "data: {\"a\":1}\n\n: a comment\n\ndata: {\"b\":2}\r\n\r\ndata: first\ndata: second\n\ndata: {\"c\""
+        var parser = EventStreamParser()
+        var events: [String] = []
+        // One byte at a time, so every boundary lands mid-chunk somewhere.
+        for byte in Data(response.utf8) {
+            events += try parser.append(Data([byte]))
+        }
+        XCTAssertEqual(events, [#"{"a":1}"#, #"{"b":2}"#, "first\nsecond"])
+        XCTAssertEqual(try parser.append(Data(":3}\n\n".utf8)), [#"{"c":3}"#])
+    }
+
+    func testEventStreamRejectsErrors() {
+        var parser = EventStreamParser()
+        XCTAssertThrowsError(try parser.append(Data("HTTP/1.1 404 Not Found\r\n\r\n".utf8))) { error in
+            XCTAssertEqual(error as? EventStreamParser.Failure, .status(404))
+        }
+        var garbage = EventStreamParser()
+        XCTAssertThrowsError(try garbage.append(Data("SSH-2.0-OpenSSH\r\n\r\n".utf8)))
+    }
+}

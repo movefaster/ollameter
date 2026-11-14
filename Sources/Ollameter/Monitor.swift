@@ -56,7 +56,7 @@ final class Monitor: ObservableObject {
 
     /// Runs on every publish, whether or not the window is open.
     var onUpdate: ((MeterViewModel) -> Void)?
-    /// Power, thermal and process readings are skipped while the window is hidden.
+    /// Power, thermal and process readings are skipped while nobody is looking at them.
     var wantsDetail = true
 
     private static let busyInterval: Duration = .milliseconds(250)
@@ -92,9 +92,12 @@ final class Monitor: ObservableObject {
     private var runnerStats: RunnerStats?
     private var tpsHistory: [Double] = []
     private var gpuHistory: [Double] = []
-    // Set straight on the model too, so a press shows at once instead of on the next tick.
+    // Published straight away too, so a press shows at once instead of on the next tick.
     private var unloadState = UnloadState.ready {
-        didSet { model.unload = unloadState }
+        didSet {
+            model.unload = unloadState
+            onUpdate?(model)
+        }
     }
     private var unloadExpiry: Task<Void, Never>?
 

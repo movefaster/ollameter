@@ -12,6 +12,24 @@ A menu bar gauge and an always-on-top window for [Ollama](https://ollama.com) on
 
 Left-click the menu bar icon to show or hide the window. Right-click it for the menu.
 
+## Watch another Mac
+
+The same app can share this Mac's numbers and show another Mac's, such as a desktop that runs the models while you work on a laptop.
+
+1. On the Mac that runs Ollama, right-click the menu bar icon and turn on **Share on Local Network**. The menu then shows the name and port other Macs use.
+2. On the other Mac, right-click the icon and pick that Mac under **Show Stats From**. Macs found with Bonjour are listed there. For one Bonjour can't see, such as over a VPN, choose **Other Mac…** and enter its name or IP address.
+
+The window then shows the other Mac's name at the top, and the menu bar icon follows that Mac too. The first time, macOS asks whether Ollameter may find devices on your local network; it needs that to share or to connect.
+
+Sharing is off until you turn it on. It's read-only: other Macs can watch, but can't unload models or change anything. It has no password, so anyone on your network can read the numbers, including model names and prompt sizes but never prompt text.
+
+Scripts can read the same data:
+
+```sh
+curl http://studio.local:11480/v1/state    # the latest update as JSON
+curl -N http://studio.local:11480/v1/events # every update, as server-sent events
+```
+
 ## Requirements
 
 - An Apple Silicon Mac with macOS 14 or later.
@@ -48,6 +66,7 @@ Two flags help when changing the UI:
 
 - `--render DIR` writes PNGs of every window state from sample data, in light and dark mode. Add `--live` to include one from this Mac.
 - `--self-test DIR --seconds N` runs the real app for N seconds, records every frame it publishes, drives the window and menu bar item, and writes a report. `--unload-test MODEL` also clicks the unload button, and only acts if MODEL is the only model loaded.
+- `--share` turns sharing on for one run, and `--connect HOST[:PORT]` (or `service:NAME` for a Bonjour name) shows another Mac for one run. Neither is saved.
 
 ## Releases
 

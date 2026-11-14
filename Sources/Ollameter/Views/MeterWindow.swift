@@ -2,15 +2,15 @@ import MeterCore
 import SwiftUI
 
 struct MeterWindowRoot: View {
-    @ObservedObject var monitor: Monitor
+    @ObservedObject var hub: MeterHub
     @AppStorage("compact") private var compact = false
     let onClose: () -> Void
     let onHeightChange: (CGFloat) -> Void
 
     var body: some View {
         MeterContent(
-            model: monitor.model, compact: compact, onToggleCompact: { compact.toggle() }, onClose: onClose,
-            onUnload: { monitor.pressUnload(model: $0) }
+            model: hub.model, compact: compact, onToggleCompact: { compact.toggle() }, onClose: onClose,
+            onUnload: { hub.pressUnload(model: $0) }
         )
         .fixedSize(horizontal: false, vertical: true)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { onHeightChange($0) }
@@ -86,6 +86,12 @@ private struct HeaderSection: View {
     @Environment(\.theme) private var theme
 
     private var phaseName: String {
+        switch model.remote?.status {
+        case .connecting: return "Connecting"
+        case .unreachable: return "Not connected"
+        case .incompatible: return "Can't read this Mac"
+        case .connected, nil: break
+        }
         switch model.display.displayPhase {
         case .offline: return "Offline"
         case .idle: return "Idle"
@@ -96,6 +102,12 @@ private struct HeaderSection: View {
     }
 
     private var phaseColor: Color {
+        switch model.remote?.status {
+        case .connecting: return theme.muted
+        case .unreachable: return theme.critical
+        case .incompatible: return theme.warning
+        case .connected, nil: break
+        }
         switch model.display.displayPhase {
         case .offline: return theme.critical
         case .idle: return theme.muted
@@ -116,11 +128,22 @@ private struct HeaderSection: View {
         return parts.joined(separator: " · ")
     }
 
+    private var phaseLabel: some View {
+        HStack(spacing: 7) {
+            Circle().fill(phaseColor).frame(width: 8, height: 8)
+            Text(phaseName).font(.system(size: 12, weight: .semibold)).foregroundStyle(theme.ink)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 7) {
-                Circle().fill(phaseColor).frame(width: 8, height: 8)
-                Text(phaseName).font(.system(size: 12, weight: .semibold)).foregroundStyle(theme.ink)
+                // Another Mac's name goes first, so it's clear whose numbers these are.
+                if let remote = model.remote {
+                    HostLabel(host: remote.host)
+                } else {
+                    phaseLabel
+                }
                 Spacer(minLength: 8)
                 if model.display.displayPhase != .offline {
                     IconButton(
@@ -129,23 +152,51 @@ private struct HeaderSection: View {
                 }
                 IconButton(symbol: "xmark", help: "Hide window", action: onClose)
             }
-            HStack(spacing: 8) {
-                Text(model.models.first?.name ?? "No model loaded")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(theme.ink)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
-                if let name = model.models.first?.name {
-                    UnloadButton(model: model, name: name, onPress: onUnload)
-                }
+            if model.remote != nil {
+                phaseLabel.padding(.top, 2)
             }
-            // Keeps the window from changing height when the button comes and goes.
-            .frame(minHeight: UnloadButton.height)
+            if model.remote?.problem == nil {
+                HStack(spacing: 8) {
+                    Text(model.models.first?.name ?? "No model loaded")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(theme.ink)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    // Sharing is read-only, so only this Mac's models can be unloaded.
+                    if model.remote == nil, let name = model.models.first?.name {
+                        UnloadButton(model: model, name: name, onPress: onUnload)
+                    }
+                }
+                // Keeps the window from changing height when the button comes and goes.
+                .frame(minHeight: UnloadButton.height)
+            }
             if !compact, model.display.displayPhase != .offline {
                 Text(details).font(.system(size: 11)).foregroundStyle(theme.ink2).lineLimit(1)
             }
         }
+    }
+}
+
+private struct HostLabel: View {
+    let host: String
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "desktopcomputer")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.ink2)
+            Text(host)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(theme.ink)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .help("Showing \(host)'s Ollama. Right-click the menu bar icon to switch.")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Showing \(host)")
     }
 }
 
@@ -252,7 +303,8 @@ private struct HeroSection: View {
         let snapshot = model.snapshot
         switch phase {
         case .offline:
-            return "Ollama isn't running on this Mac."
+            guard let remote = model.remote else { return "Ollama isn't running on this Mac." }
+            return remote.problem ?? "Ollama isn't running on \(remote.host)."
         case .loading:
             return "Moving the model into memory."
         case .idle:
@@ -298,7 +350,8 @@ private struct HeroSection: View {
                     }
                 }
             }
-            Text(detail).font(.system(size: 12)).foregroundStyle(theme.ink2).lineLimit(1)
+            // Messages about a connection can run long. Live details stay on one line so the window holds still.
+            Text(detail).font(.system(size: 12)).foregroundStyle(theme.ink2).lineLimit(phase == .offline ? 2 : 1)
             // The bar's space stays reserved so the window doesn't resize when a prompt starts.
             if phase != .offline {
                 Meter(fraction: model.snapshot.promptFraction ?? 0, color: theme.prompt)

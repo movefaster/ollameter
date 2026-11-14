@@ -88,6 +88,16 @@ enum Fixtures {
         return model
     }
 
+    static func remote(_ model: MeterViewModel) -> MeterViewModel {
+        var model = model
+        model.remote = RemoteSource(host: "studio", status: .connected)
+        return model
+    }
+
+    static func remote(_ status: RemoteSource.Status) -> MeterViewModel {
+        .placeholder(for: RemoteSource(host: "studio", status: status))
+    }
+
     static func offline() -> MeterViewModel {
         var model = MeterViewModel()
         model.snapshot.phase = .offline
@@ -145,12 +155,21 @@ enum Renderer {
             ("compact-unload-confirm", Fixtures.idle { .confirming(model: $0) }, true),
             ("compact-unloading", Fixtures.idle { .unloading(model: $0) }, true),
             ("compact-unload-failed", Fixtures.idle { .failed(model: $0) }, true),
+            ("remote", Fixtures.remote(Fixtures.generating()), false),
+            ("remote-offline", Fixtures.remote(Fixtures.offline()), false),
+            ("compact-remote", Fixtures.remote(Fixtures.generating()), true),
+            ("compact-remote-idle", Fixtures.remote(Fixtures.idle()), true),
+            ("compact-remote-connecting", Fixtures.remote(.connecting), true),
+            ("compact-remote-unreachable", Fixtures.remote(.unreachable), true),
+            ("compact-remote-incompatible", Fixtures.remote(.incompatible(app: "0.3.0")), true),
         ]
         for scheme in [ColorScheme.light, .dark] {
             for (name, fixture, compact) in states {
                 var model = fixture
-                var presenter = DisplayPresenter()
-                model.display = presenter.present(model)
+                if model.remote?.problem == nil {
+                    var presenter = DisplayPresenter()
+                    model.display = presenter.present(model)
+                }
                 render(model, compact: compact, scheme: scheme, to: directory, name: name)
             }
         }
@@ -238,21 +257,23 @@ enum Renderer {
 @MainActor
 enum SelfTest {
     static func schedule(
-        directory: URL, seconds: Double, unloadModel: String?, monitor: Monitor, panel: NSPanel,
-        statusItem: NSStatusItem
+        directory: URL, seconds: Double, unloadModel: String?, hub: MeterHub, panel: NSPanel,
+        statusItem: NSStatusItem, menu: @escaping () -> [String]
     ) {
+        let monitor = hub.monitor
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var trace = "seconds,snapshot,display,text,dimmed,liveTPS,panelHeight,footprintMB,task,promptFraction\n"
+        var trace = "seconds,snapshot,display,text,dimmed,liveTPS,panelHeight,footprintMB,task,promptFraction,remote\n"
         let start = Date()
-        let forward = monitor.onUpdate
-        monitor.onUpdate = { model in
+        let forward = hub.onUpdate
+        hub.onUpdate = { model in
             forward?(model)
             let elapsed = String(format: "%.2f", Date().timeIntervalSince(start))
             let tps = model.snapshot.liveTPS.map { String(format: "%.1f", $0) } ?? ""
             let display = model.display
             trace += "\(elapsed),\(model.snapshot.phase.rawValue),\(display.displayPhase.rawValue),"
                 + "\(display.text ?? ""),\(display.textDimmed),\(tps),\(Int(panel.frame.height)),\(footprintMegabytes()),"
-                + "\(model.snapshot.task.map(String.init) ?? ""),\(model.snapshot.promptFraction.map { String(format: "%.4f", $0) } ?? "")\n"
+                + "\(model.snapshot.task.map(String.init) ?? ""),\(model.snapshot.promptFraction.map { String(format: "%.4f", $0) } ?? ""),"
+                + "\(model.remote.map { "\($0.host):\($0.status)" } ?? "local")\n"
         }
 
         Task { @MainActor in
@@ -286,13 +307,41 @@ enum SelfTest {
             let shownByClick = panel.isVisible
             UserDefaults.standard.set(startedCompact, forKey: "compact")
             try? await Task.sleep(for: .seconds(1))
+            // The menu's sharing item, without saving the change.
+            var sharingToggle: [String: Any] = [:]
+            if hub.isSharing {
+                sharingToggle["menuWhileOn"] = menu()
+                hub.setSharing(false, persist: false)
+                try? await Task.sleep(for: .seconds(1))
+                sharingToggle["afterOff"] = ["running": hub.server.isRunning, "port": hub.server.port.map(Int.init) ?? -1]
+                sharingToggle["menuWhileOff"] = menu()
+                hub.setSharing(true, persist: false)
+                try? await Task.sleep(for: .seconds(3))
+                sharingToggle["afterOn"] = [
+                    "running": hub.server.isRunning, "port": hub.server.port.map(Int.init) ?? -1,
+                    "advertisedName": hub.server.advertisedName ?? "none",
+                ]
+            }
             var unloadResult: [String: Any] = [:]
-            if let unloadModel {
+            if let unloadModel, hub.source.isLocal {
                 unloadResult = await exerciseUnload(unloadModel, monitor: monitor, panel: panel, directory: directory)
             }
 
             let report: [String: Any] = [
                 "unloadTest": unloadResult,
+                "sharingToggle": sharingToggle,
+                "menu": menu(),
+                "source": hub.source.storageValue,
+                "shownHost": hub.model.remote?.host ?? "this Mac",
+                "remoteStatus": hub.model.remote.map { String(describing: $0.status) } ?? "local",
+                "shownPhase": hub.model.display.displayPhase.rawValue,
+                "shownModel": hub.model.models.first?.name ?? "none",
+                "peers": hub.peers,
+                "sharing": hub.isSharing,
+                "sharingStatus": hub.sharingStatus ?? "off",
+                "sharingPort": hub.server.port.map(Int.init) ?? -1,
+                "advertisedName": hub.server.advertisedName ?? "none",
+                "detailReadings": monitor.wantsDetail,
                 "panelVisible": panel.isVisible,
                 "panelLevel": panel.level.rawValue,
                 "floatingLevel": NSWindow.Level.floating.rawValue,
@@ -309,8 +358,8 @@ enum SelfTest {
                 "statusImageSize": button?.image.map { NSStringFromSize($0.size) } ?? "none",
                 "statusAppearance": button?.effectiveAppearance.name.rawValue ?? "none",
                 "statusTooltip": button?.toolTip ?? "",
-                "requestsSeen": monitor.model.stats.requests,
-                "lastRequestTPS": monitor.model.requests.first?.generationTPS ?? -1,
+                "requestsSeen": hub.model.stats.requests,
+                "lastRequestTPS": hub.model.requests.first?.generationTPS ?? -1,
             ]
             if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
                 try? data.write(to: directory.appendingPathComponent("report.json"))

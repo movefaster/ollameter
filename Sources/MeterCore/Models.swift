@@ -1,6 +1,6 @@
 import Foundation
 
-public enum Phase: String, Equatable, Sendable {
+public enum Phase: String, Equatable, Sendable, Codable {
     case offline, idle, loading, prefill, generating
 
     public var isBusy: Bool { self == .prefill || self == .generating || self == .loading }
@@ -32,7 +32,7 @@ public struct SlotReading: Equatable, Sendable {
     }
 }
 
-public struct LiveSnapshot: Equatable, Sendable {
+public struct LiveSnapshot: Equatable, Sendable, Codable {
     public var phase: Phase = .idle
     public var task: Int?
     public var contextSize: Int?
@@ -53,7 +53,7 @@ public struct LiveSnapshot: Equatable, Sendable {
     public init() {}
 }
 
-public struct CompletedRequest: Equatable, Sendable, Identifiable {
+public struct CompletedRequest: Equatable, Sendable, Identifiable, Codable {
     public var id: Int { sequence }
     public var sequence: Int
     public var task: Int
@@ -92,7 +92,7 @@ public struct CompletedRequest: Equatable, Sendable, Identifiable {
 }
 
 /// Peak, low and weighted average speed across requests large enough to be meaningful.
-public struct SpeedStat: Equatable, Sendable {
+public struct SpeedStat: Equatable, Sendable, Codable {
     public private(set) var peak: Double?
     public private(set) var low: Double?
     public private(set) var history: [Double] = []
@@ -117,7 +117,7 @@ public struct SpeedStat: Equatable, Sendable {
     }
 }
 
-public struct SessionStats: Equatable, Sendable {
+public struct SessionStats: Equatable, Sendable, Codable {
     public static let promptMinTokens = 64
     public static let generationMinTokens = 16
 
@@ -171,7 +171,7 @@ public struct SessionStats: Equatable, Sendable {
 
 /// What llama-server last logged about the prompts it keeps in RAM. It only writes this when the cache
 /// changes, so the last report stays accurate until the next one. The prompt in the slot isn't included.
-public struct PromptCacheState: Equatable, Sendable {
+public struct PromptCacheState: Equatable, Sendable, Codable {
     /// Nil when llama-server runs with no limit.
     public var limitBytes: UInt64?
     public var usedBytes: UInt64
@@ -224,8 +224,8 @@ public enum UnloadState: Equatable, Sendable {
     }
 }
 
-public struct Notice: Equatable, Sendable, Identifiable {
-    public enum Severity: Sendable { case warning, serious }
+public struct Notice: Equatable, Sendable, Identifiable, Codable {
+    public enum Severity: String, Sendable, Codable { case warning, serious }
 
     public var id: String
     public var severity: Severity
@@ -240,7 +240,7 @@ public struct Notice: Equatable, Sendable, Identifiable {
     }
 }
 
-public struct LoadedModel: Equatable, Sendable, Identifiable {
+public struct LoadedModel: Equatable, Sendable, Identifiable, Codable {
     public var id: String { name }
     public var name: String
     public var size: UInt64
@@ -264,11 +264,11 @@ public struct LoadedModel: Equatable, Sendable, Identifiable {
     }
 }
 
-public enum MemoryPressure: String, Equatable, Sendable {
+public enum MemoryPressure: String, Equatable, Sendable, Codable {
     case normal = "Normal", warning = "Warning", critical = "Critical"
 }
 
-public struct HardwareSample: Equatable, Sendable {
+public struct HardwareSample: Equatable, Sendable, Codable {
     public var gpuUtilization: Double?
     public var gpuMemoryInUse: UInt64?
     public var gpuPowerWatts: Double?
@@ -279,7 +279,7 @@ public struct HardwareSample: Equatable, Sendable {
     public init() {}
 }
 
-public struct RunnerStats: Equatable, Sendable {
+public struct RunnerStats: Equatable, Sendable, Codable {
     public var cpuPercent: Double?
     public var residentBytes: UInt64?
 
@@ -289,7 +289,7 @@ public struct RunnerStats: Equatable, Sendable {
     }
 }
 
-public struct MeterViewModel: Equatable, Sendable {
+public struct MeterViewModel: Equatable, Sendable, Codable {
     public static let historyLimit = 60
     public static let noticeLifetime: TimeInterval = 300
 
@@ -307,8 +307,16 @@ public struct MeterViewModel: Equatable, Sendable {
     public var unload = UnloadState.ready
     public var tpsHistory: [Double] = []
     public var gpuHistory: [Double] = []
+    /// Set when the numbers come from another Mac rather than this one.
+    public var remote: RemoteSource?
 
     public init() {}
+
+    // The unload button and the remote source belong to the Mac showing the window, so they aren't shared.
+    private enum CodingKeys: String, CodingKey {
+        case now, snapshot, display, stats, requests, notices, models, version, hardware, runner, promptCache
+        case tpsHistory, gpuHistory
+    }
 
     /// True during a request and the short gaps between an agent's requests, when unloading would cut in.
     public var isWorking: Bool { snapshot.phase.isBusy || display.displayPhase.isBusy }
