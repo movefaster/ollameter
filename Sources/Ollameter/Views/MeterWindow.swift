@@ -5,35 +5,101 @@ struct MeterWindowRoot: View {
     @ObservedObject var hub: MeterHub
     @AppStorage("compact") private var compact = false
     let onClose: () -> Void
-    let onHeightChange: (CGFloat) -> Void
+    let onSizeChange: (CGSize) -> Void
 
     var body: some View {
-        MeterContent(
-            model: hub.model, compact: compact, onToggleCompact: { compact.toggle() }, onClose: onClose,
-            onUnload: { hub.pressUnload(model: $0) }
+        MeterBoard(
+            models: hub.models, compact: compact, localHost: Sharing.hostName,
+            onToggleCompact: { compact.toggle() }, onClose: onClose, onUnload: { hub.pressUnload(model: $0) }
         )
-        .fixedSize(horizontal: false, vertical: true)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { onHeightChange($0) }
-        .frame(maxHeight: .infinity, alignment: .top)
+        .fixedSize()
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { onSizeChange($0) }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .ignoresSafeArea()
     }
 }
 
-/// The whole window as a pure function of the view model, so it can also be rendered offscreen.
-struct MeterContent: View {
-    let model: MeterViewModel
+/// Names the Mac a section belongs to. One Mac on its own needs no name unless it's another Mac.
+struct SectionHeading: Equatable {
+    var host: String
+    var isLocal: Bool
+}
+
+/// The window's controls live in one section only: the top one when stacked, the right one in columns.
+struct SectionControls: Equatable {
+    var showsCompactToggle: Bool
+}
+
+/// Every watched Mac: stacked sections when compact, side-by-side columns when expanded.
+struct MeterBoard: View {
+    let models: [MeterViewModel]
     let compact: Bool
+    let localHost: String
     var onToggleCompact: () -> Void = {}
     var onClose: () -> Void = {}
     var onUnload: (String) -> Void = { _ in }
 
     @Environment(\.colorScheme) private var colorScheme
 
+    private func heading(for model: MeterViewModel) -> SectionHeading? {
+        if let remote = model.remote { return SectionHeading(host: remote.host, isLocal: false) }
+        return models.count > 1 ? SectionHeading(host: localHost, isLocal: true) : nil
+    }
+
+    private func controls(at index: Int) -> SectionControls? {
+        guard index == (compact ? 0 : models.count - 1) else { return nil }
+        // An offline Mac looks the same either way, so the toggle only shows when it would change something.
+        return SectionControls(showsCompactToggle: models.contains { $0.display.displayPhase != .offline })
+    }
+
+    private func section(_ index: Int) -> MeterContent {
+        MeterContent(
+            model: models[index], compact: compact, heading: heading(for: models[index]), controls: controls(at: index),
+            onToggleCompact: onToggleCompact, onClose: onClose, onUnload: onUnload)
+    }
+
     var body: some View {
         let theme = Theme(colorScheme)
+        Group {
+            if compact {
+                VStack(spacing: 0) {
+                    ForEach(models.indices, id: \.self) { index in
+                        if index > 0 { Hairline() }
+                        section(index)
+                    }
+                }
+            } else {
+                // Columns share the tallest one's height, so the dividers run the full length.
+                HStack(alignment: .top, spacing: 0) {
+                    ForEach(models.indices, id: \.self) { index in
+                        if index > 0 {
+                            Rectangle().fill(theme.hairline).frame(width: 1).frame(maxHeight: .infinity)
+                        }
+                        section(index).frame(maxHeight: .infinity, alignment: .top)
+                    }
+                }
+            }
+        }
+        .background(theme.surface)
+        .environment(\.theme, theme)
+    }
+}
+
+/// One Mac's section of the window, as a pure function of its view model, so it can also be rendered offscreen.
+struct MeterContent: View {
+    let model: MeterViewModel
+    let compact: Bool
+    var heading: SectionHeading?
+    var controls: SectionControls?
+    var onToggleCompact: () -> Void = {}
+    var onClose: () -> Void = {}
+    var onUnload: (String) -> Void = { _ in }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HeaderSection(
-                model: model, compact: compact, onToggleCompact: onToggleCompact, onClose: onClose, onUnload: onUnload)
+                model: model, compact: compact, heading: heading, controls: controls, onToggleCompact: onToggleCompact,
+                onClose: onClose, onUnload: onUnload)
             HeroSection(model: model)
             if model.display.displayPhase == .offline {
                 EmptyView()
@@ -71,14 +137,14 @@ struct MeterContent: View {
         .padding(.top, 10)
         .padding(.bottom, 14)
         .frame(width: MeterLayout.width, alignment: .leading)
-        .background(theme.surface)
-        .environment(\.theme, theme)
     }
 }
 
 private struct HeaderSection: View {
     let model: MeterViewModel
     let compact: Bool
+    let heading: SectionHeading?
+    let controls: SectionControls?
     let onToggleCompact: () -> Void
     let onClose: () -> Void
     let onUnload: (String) -> Void
@@ -138,21 +204,25 @@ private struct HeaderSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 7) {
-                // Another Mac's name goes first, so it's clear whose numbers these are.
-                if let remote = model.remote {
-                    HostLabel(host: remote.host)
+                // The Mac's name goes first, so it's clear whose numbers these are.
+                if let heading {
+                    HostLabel(heading: heading)
                 } else {
                     phaseLabel
                 }
                 Spacer(minLength: 8)
-                if model.display.displayPhase != .offline {
-                    IconButton(
-                        symbol: compact ? "chevron.down" : "chevron.up",
-                        help: compact ? "Show all metrics" : "Show less", action: onToggleCompact)
+                if let controls {
+                    if controls.showsCompactToggle {
+                        IconButton(
+                            symbol: compact ? "chevron.down" : "chevron.up",
+                            help: compact ? "Show all metrics" : "Show less", action: onToggleCompact)
+                    }
+                    IconButton(symbol: "xmark", help: "Hide window", action: onClose)
                 }
-                IconButton(symbol: "xmark", help: "Hide window", action: onClose)
             }
-            if model.remote != nil {
+            // Sections without the window's buttons keep the same height as the one with them.
+            .frame(minHeight: IconButton.size)
+            if heading != nil {
                 phaseLabel.padding(.top, 2)
             }
             if model.remote?.problem == nil {
@@ -179,24 +249,30 @@ private struct HeaderSection: View {
 }
 
 private struct HostLabel: View {
-    let host: String
+    let heading: SectionHeading
 
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "desktopcomputer")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(theme.ink2)
-            Text(host)
+            Text(heading.host)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(theme.ink)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            if heading.isLocal {
+                Text("This Mac").font(.system(size: 11)).foregroundStyle(theme.ink2).lineLimit(1).fixedSize()
+            }
         }
-        .help("Showing \(host)'s Ollama. Right-click the menu bar icon to switch.")
+        .help(
+            heading.isLocal
+                ? "This Mac's Ollama. Right-click the menu bar icon to choose which Macs to show."
+                : "\(heading.host)'s Ollama. Right-click the menu bar icon to choose which Macs to show.")
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Showing \(host)")
+        .accessibilityLabel(heading.isLocal ? "\(heading.host), this Mac" : heading.host)
     }
 }
 

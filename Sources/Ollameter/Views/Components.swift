@@ -166,6 +166,8 @@ struct StatTile: View {
 }
 
 struct IconButton: View {
+    static let size: CGFloat = 24
+
     let symbol: String
     let help: String
     let action: () -> Void
@@ -177,7 +179,7 @@ struct IconButton: View {
             Image(systemName: symbol)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(theme.ink2)
-                .frame(width: 24, height: 24)
+                .frame(width: Self.size, height: Self.size)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

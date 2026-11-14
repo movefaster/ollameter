@@ -6,7 +6,7 @@ import SwiftUI
 final class StatusItemController: NSObject {
     private struct Shown: Equatable {
         var display: DisplayState
-        var host: String?
+        var lines: [String]
         var appearance: NSAppearance.Name?
     }
 
@@ -16,12 +16,19 @@ final class StatusItemController: NSObject {
     private let hub: MeterHub
     private let isPanelVisible: () -> Bool
     private let togglePanel: () -> Void
+    private let isOnTop: () -> Bool
+    private let setOnTop: (Bool) -> Void
 
-    init(hub: MeterHub, isPanelVisible: @escaping () -> Bool, togglePanel: @escaping () -> Void) {
+    init(
+        hub: MeterHub, isPanelVisible: @escaping () -> Bool, togglePanel: @escaping () -> Void,
+        isOnTop: @escaping () -> Bool, setOnTop: @escaping (Bool) -> Void
+    ) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.hub = hub
         self.isPanelVisible = isPanelVisible
         self.togglePanel = togglePanel
+        self.isOnTop = isOnTop
+        self.setOnTop = setOnTop
         super.init()
         guard let button = item.button else { return }
         button.imagePosition = .imageOnly
@@ -30,25 +37,27 @@ final class StatusItemController: NSObject {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
-    func update(_ model: MeterViewModel) {
+    /// The icon follows the busiest Mac. The tooltip has a line for each one.
+    func update() {
         guard let button = item.button else { return }
         let appearance = button.effectiveAppearance
-        let shown = Shown(
-            display: model.display, host: model.remote?.host,
-            appearance: appearance.bestMatch(from: [.darkAqua, .aqua]))
+        let models = hub.models
+        let lines: [String]
+        if models.count == 1, models[0].remote == nil {
+            lines = [models[0].display.summary]
+        } else {
+            // A connection problem already names the Mac.
+            lines = models.map { model in
+                model.remote?.problem ?? "\(model.remote?.host ?? Sharing.hostName): \(model.display.summary)"
+            }
+        }
+        let primary = hub.primary.display
+        let shown = Shown(display: primary, lines: lines, appearance: appearance.bestMatch(from: [.darkAqua, .aqua]))
         guard shown != lastShown else { return }
         lastShown = shown
-        let presentation = model.display
-        button.image = MenuBarRenderer.image(for: presentation, appearance: appearance)
-        if let remote = model.remote {
-            // A connection problem's summary already names the Mac.
-            let summary = remote.problem ?? "\(remote.host): \(presentation.summary)"
-            button.toolTip = summary
-            button.setAccessibilityLabel("Ollama on \(remote.host): \(remote.problem ?? presentation.summary)")
-        } else {
-            button.toolTip = presentation.summary
-            button.setAccessibilityLabel("Ollama: \(presentation.summary)")
-        }
+        button.image = MenuBarRenderer.image(for: primary, appearance: appearance)
+        button.toolTip = lines.joined(separator: "\n")
+        button.setAccessibilityLabel("Ollama: " + lines.joined(separator: ". "))
     }
 
     /// The menu's items as text, for the self-test.
@@ -92,19 +101,18 @@ final class StatusItemController: NSObject {
     private func populate(_ menu: NSMenu) {
         menu.removeAllItems()
         menu.addItem(action(isPanelVisible() ? "Hide Window" : "Show Window", #selector(toggleFromMenu)))
+        let onTop = action("Keep Window on Top", #selector(toggleOnTop))
+        onTop.state = isOnTop() ? .on : .off
+        onTop.toolTip = "Keeps the window above other apps' windows. Turn it off to let them cover it."
+        menu.addItem(onTop)
         menu.addItem(.separator())
 
         menu.addItem(.sectionHeader(title: "Show Stats From"))
-        menu.addItem(sourceItem(.local))
-        var listed: [MeterSource] = [.local]
-        for name in hub.peers {
-            let source = MeterSource.service(name: name)
+        var listed: [MeterSource] = [.local] + hub.peers.map { .service(name: $0) }
+        // Macs being watched stay listed while Bonjour can't see them, or when they were typed in.
+        listed += hub.sources.filter { !listed.contains($0) }
+        for source in listed {
             menu.addItem(sourceItem(source))
-            listed.append(source)
-        }
-        // The Mac being followed stays listed while Bonjour can't see it, or when it was typed in.
-        if !listed.contains(hub.source) {
-            menu.addItem(sourceItem(hub.source))
         }
         if hub.peers.isEmpty {
             let none = NSMenuItem(title: "No other Macs found sharing", action: nil, keyEquivalent: "")
@@ -136,7 +144,11 @@ final class StatusItemController: NSObject {
     private func sourceItem(_ source: MeterSource) -> NSMenuItem {
         let item = action(source.displayName, #selector(chooseSource(_:)))
         item.representedObject = source.storageValue
-        item.state = source == hub.source ? .on : .off
+        let watched = hub.sources.contains(source)
+        item.state = watched ? .on : .off
+        if watched, hub.sources.count == 1 {
+            item.toolTip = "Pick another Mac before turning this one off."
+        }
         return item
     }
 
@@ -144,9 +156,13 @@ final class StatusItemController: NSObject {
         togglePanel()
     }
 
+    @objc private func toggleOnTop() {
+        setOnTop(!isOnTop())
+    }
+
     @objc private func chooseSource(_ sender: NSMenuItem) {
         guard let value = sender.representedObject as? String, let source = MeterSource(storageValue: value) else { return }
-        hub.select(source)
+        hub.toggle(source)
     }
 
     @objc private func toggleSharing() {
@@ -155,7 +171,6 @@ final class StatusItemController: NSObject {
 
     @objc private func enterAddress() {
         var text = ""
-        if case .address = hub.source { text = hub.source.displayName }
         var problem: String?
         while true {
             let alert = NSAlert()
@@ -174,7 +189,7 @@ final class StatusItemController: NSObject {
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             text = field.stringValue
             if let source = MeterSource.address(text) {
-                hub.select(source)
+                hub.add(source)
                 return
             }
             problem = "That isn't a name or address Ollameter can use."
@@ -191,6 +206,7 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
 final class PanelController: NSObject, NSWindowDelegate {
     private static let frameName = "OllameterPanel"
     private static let visibleKey = "panelVisible"
+    private static let onTopKey = "alwaysOnTop"
     private static let screenMargin: CGFloat = 12
 
     let panel: NSPanel
@@ -206,8 +222,7 @@ final class PanelController: NSObject, NSWindowDelegate {
 
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
-        panel.isFloatingPanel = true
-        panel.level = .floating
+        setAlwaysOnTop(UserDefaults.standard.object(forKey: Self.onTopKey) as? Bool ?? true, persist: false)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
@@ -220,12 +235,13 @@ final class PanelController: NSObject, NSWindowDelegate {
         let root = MeterWindowRoot(
             hub: hub,
             onClose: { [weak self] in self?.setVisible(false) },
-            onHeightChange: { [weak self] height in self?.fit(height: height) })
+            onSizeChange: { [weak self] size in self?.fit(size) })
         let host = FirstMouseHostingView(rootView: root)
         host.sizingOptions = []
         panel.contentView = host
 
-        if UserDefaults.standard.string(forKey: "NSWindow Frame \(Self.frameName)") != nil {
+        let saved = UserDefaults.standard.string(forKey: "NSWindow Frame \(Self.frameName)")
+        if saved != nil {
             panel.setFrameUsingName(Self.frameName)
         } else if let screen = NSScreen.main {
             let area = screen.visibleFrame
@@ -235,15 +251,50 @@ final class PanelController: NSObject, NSWindowDelegate {
                     y: area.maxY - panel.frame.height - Self.screenMargin))
         }
         panel.setFrameAutosaveName(Self.frameName)
+        // AppKit moves a window saved on a second screen to the main one when that screen's usable area
+        // differs at all from when it was saved, so a spot that's still on a screen is put back as is.
+        if let saved, let frame = Self.frame(from: saved), Self.screen(containing: frame) != nil {
+            panel.setFrame(frame, display: false)
+        }
+    }
+
+    /// The window's own rectangle from AppKit's saved string, which goes on to describe the screen.
+    private static func frame(from saved: String) -> NSRect? {
+        let numbers = saved.split(separator: " ").compactMap { Double($0) }
+        guard numbers.count >= 4, numbers[2] > 0, numbers[3] > 0 else { return nil }
+        return NSRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
+    }
+
+    /// The screen holding the top of the window, where its buttons are.
+    private static func screen(containing frame: NSRect) -> NSScreen? {
+        let top = NSRect(x: frame.minX, y: frame.maxY - 24, width: frame.width, height: 24)
+        return NSScreen.screens.max { first, second in
+            first.frame.intersection(top).width < second.frame.intersection(top).width
+        }.flatMap { $0.frame.intersects(top) ? $0 : nil }
     }
 
     var isVisible: Bool { panel.isVisible }
+
+    var isAlwaysOnTop: Bool { panel.level == .floating }
+
+    /// On by default. Off, the window sits among other windows and goes behind them like any other.
+    func setAlwaysOnTop(_ onTop: Bool, persist: Bool = true) {
+        if persist { UserDefaults.standard.set(onTop, forKey: Self.onTopKey) }
+        panel.isFloatingPanel = onTop
+        panel.level = onTop ? .floating : .normal
+    }
 
     func restoreVisibility() {
         setVisible(UserDefaults.standard.object(forKey: Self.visibleKey) as? Bool ?? true)
     }
 
     func toggle() {
+        // When it isn't kept on top and other windows cover it completely, a click brings it forward
+        // rather than hiding a window nobody can see.
+        if panel.isVisible, !isAlwaysOnTop, !panel.occlusionState.contains(.visible) {
+            panel.orderFrontRegardless()
+            return
+        }
         setVisible(!panel.isVisible)
     }
 
@@ -257,12 +308,21 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Keeps the top edge in place as the content grows or shrinks.
-    private func fit(height: CGFloat) {
-        guard height > 0, abs(panel.frame.height - height) > 0.5 else { return }
+    /// Keeps the top edge in place as the content grows or shrinks. Columns for more Macs grow away
+    /// from the nearer side of the screen, and the window stays on screen.
+    private func fit(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
         var frame = panel.frame
-        frame.origin.y = frame.maxY - height
-        frame.size.height = height
+        guard abs(frame.width - size.width) > 0.5 || abs(frame.height - size.height) > 0.5 else { return }
+        let area = (Self.screen(containing: frame) ?? panel.screen ?? NSScreen.main)?.visibleFrame
+        if let area, frame.midX > area.midX {
+            frame.origin.x = frame.maxX - size.width
+        }
+        frame.origin.y = frame.maxY - size.height
+        frame.size = size
+        if let area {
+            frame.origin.x = min(max(frame.origin.x, area.minX), max(area.maxX - frame.width, area.minX))
+        }
         panel.setFrame(frame, display: true)
     }
 }
@@ -274,7 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var selfTestSeconds: Double = 8
         var selfTestUnloadModel: String?
         /// For this run only: whose numbers to show, and whether to share.
-        var source: MeterSource?
+        var sources: [MeterSource]?
         var sharing: Bool?
     }
 
@@ -288,13 +348,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let hub = MeterHub(monitor: Monitor(), sourceOverride: options.source, sharingOverride: options.sharing)
+        let hub = MeterHub(monitor: Monitor(), sourcesOverride: options.sources, sharingOverride: options.sharing)
         let panelController = PanelController(hub: hub)
         let statusController = StatusItemController(
             hub: hub,
             isPanelVisible: { [weak panelController] in panelController?.isVisible ?? false },
-            togglePanel: { [weak panelController] in panelController?.toggle() })
-        hub.onUpdate = { [weak statusController] model in statusController?.update(model) }
+            togglePanel: { [weak panelController] in panelController?.toggle() },
+            isOnTop: { [weak panelController] in panelController?.isAlwaysOnTop ?? true },
+            setOnTop: { [weak panelController] onTop in panelController?.setAlwaysOnTop(onTop) })
+        hub.onUpdate = { [weak statusController] in statusController?.update() }
         hub.onNetworkChange = { [weak statusController] in statusController?.networkChanged() }
         self.hub = hub
         self.panelController = panelController
@@ -307,7 +369,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SelfTest.schedule(
                 directory: directory, seconds: options.selfTestSeconds, unloadModel: options.selfTestUnloadModel,
                 hub: hub, panel: panelController.panel, statusItem: statusController.item,
-                menu: { [weak statusController] in statusController?.menuSnapshot() ?? [] })
+                menu: { [weak statusController] in statusController?.menuSnapshot() ?? [] },
+                setOnTop: { [weak panelController] onTop in panelController?.setAlwaysOnTop(onTop, persist: false) })
         }
     }
 }

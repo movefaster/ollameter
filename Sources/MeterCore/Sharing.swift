@@ -271,3 +271,34 @@ public struct EventStreamParser: Sendable {
         return events
     }
 }
+
+extension MeterSource {
+    /// The order sections appear in: this Mac first, then other Macs by name. Duplicates are dropped.
+    public static func ordered(_ sources: [MeterSource]) -> [MeterSource] {
+        var seen = Set<MeterSource>()
+        return sources.filter { seen.insert($0).inserted }.sorted { first, second in
+            if first.isLocal != second.isLocal { return first.isLocal }
+            return first.displayName.localizedStandardCompare(second.displayName) == .orderedAscending
+        }
+    }
+}
+
+extension MeterViewModel {
+    /// How much is happening, for choosing which Mac the menu bar icon follows.
+    public var activityRank: Int {
+        if remote?.problem != nil { return 0 }
+        switch display.displayPhase {
+        case .prefill, .generating, .loading: return 2
+        case .idle: return 1
+        case .offline: return 0
+        }
+    }
+
+    /// The busiest of several Macs. The current one stays while nothing is busier, so the icon doesn't
+    /// jump between Macs that are equally busy.
+    public static func busiestIndex(of models: [MeterViewModel], keeping current: Int?) -> Int? {
+        guard let best = models.map(\.activityRank).max() else { return nil }
+        if let current, models.indices.contains(current), models[current].activityRank == best { return current }
+        return models.firstIndex { $0.activityRank == best }
+    }
+}

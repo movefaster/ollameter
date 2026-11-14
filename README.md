@@ -10,16 +10,16 @@ A menu bar gauge and an always-on-top window for [Ollama](https://ollama.com) on
 - **Window:** generation and prompt speed, time to first token, cache reuse, context and prompt cache fill, GPU power and temperature, memory pressure and recent requests. The chevron switches to a compact view with just the headline numbers.
 - **Unload button:** frees the loaded model's memory without waiting for its keep-alive to run out. It asks for a second click, since reloading a large model and rereading its prompts takes a while, and it's disabled while the model is working.
 
-Left-click the menu bar icon to show or hide the window. Right-click it for the menu.
+Left-click the menu bar icon to show or hide the window. Right-click it for the menu. The window stays above other windows until you uncheck **Keep Window on Top** there.
 
 ## Watch another Mac
 
 The same app can share this Mac's numbers and show another Mac's, such as a desktop that runs the models while you work on a laptop.
 
 1. On the Mac that runs Ollama, right-click the menu bar icon and turn on **Share on Local Network**. The menu then shows the name and port other Macs use.
-2. On the other Mac, right-click the icon and pick that Mac under **Show Stats From**. Macs found with Bonjour are listed there. For one Bonjour can't see, such as over a VPN, choose **Other Mac…** and enter its name or IP address.
+2. On the other Mac, right-click the icon and check that Mac under **Show Stats From**. Macs found with Bonjour are listed there. For one Bonjour can't see, such as over a VPN, choose **Other Mac…** and enter its name or IP address.
 
-The window then shows the other Mac's name at the top, and the menu bar icon follows that Mac too. The first time, macOS asks whether Ollameter may find devices on your local network; it needs that to share or to connect.
+Check as many Macs as you like, including **This Mac**. Each gets its own section, headed by its name: the compact window stacks them, and the full window puts them side by side. The menu bar icon follows whichever Mac is busiest, and its tooltip has a line for each. The first time, macOS asks whether Ollameter may find devices on your local network; it needs that to share or to connect.
 
 Sharing is off until you turn it on. It's read-only: other Macs can watch, but can't unload models or change anything. It has no password, so anyone on your network can read the numbers, including model names and prompt sizes but never prompt text.
 
@@ -66,7 +66,7 @@ Two flags help when changing the UI:
 
 - `--render DIR` writes PNGs of every window state from sample data, in light and dark mode. Add `--live` to include one from this Mac.
 - `--self-test DIR --seconds N` runs the real app for N seconds, records every frame it publishes, drives the window and menu bar item, and writes a report. `--unload-test MODEL` also clicks the unload button, and only acts if MODEL is the only model loaded.
-- `--share` turns sharing on for one run, and `--connect HOST[:PORT]` (or `service:NAME` for a Bonjour name) shows another Mac for one run. Neither is saved.
+- `--share` turns sharing on for one run, and `--connect HOST[:PORT]` (or `service:NAME` for a Bonjour name, or `local`) shows that Mac for one run. Repeat `--connect` to show several. Neither is saved.
 
 ## Releases
 

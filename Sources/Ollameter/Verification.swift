@@ -88,14 +88,15 @@ enum Fixtures {
         return model
     }
 
-    static func remote(_ model: MeterViewModel) -> MeterViewModel {
+    static func remote(_ model: MeterViewModel, host: String = "studio", modelName: String? = nil) -> MeterViewModel {
         var model = model
-        model.remote = RemoteSource(host: "studio", status: .connected)
+        model.remote = RemoteSource(host: host, status: .connected)
+        if let modelName, !model.models.isEmpty { model.models[0].name = modelName }
         return model
     }
 
-    static func remote(_ status: RemoteSource.Status) -> MeterViewModel {
-        .placeholder(for: RemoteSource(host: "studio", status: status))
+    static func remote(_ status: RemoteSource.Status, host: String = "studio") -> MeterViewModel {
+        .placeholder(for: RemoteSource(host: host, status: status))
     }
 
     static func offline() -> MeterViewModel {
@@ -163,14 +164,19 @@ enum Renderer {
             ("compact-remote-unreachable", Fixtures.remote(.unreachable), true),
             ("compact-remote-incompatible", Fixtures.remote(.incompatible(app: "0.3.0")), true),
         ]
+        // Several Macs at once: this one, a busy one, and a third in various states.
+        let watching: [(String, [MeterViewModel], Bool)] = [
+            ("multi", [Fixtures.idle(), Fixtures.remote(Fixtures.generating()), Fixtures.remote(Fixtures.prefill(), host: "mini", modelName: "llama3.3:70b")], false),
+            ("multi-unreachable", [Fixtures.idle(), Fixtures.remote(Fixtures.generating()), Fixtures.remote(.unreachable, host: "mini")], false),
+            ("compact-multi", [Fixtures.idle(), Fixtures.remote(Fixtures.generating()), Fixtures.remote(Fixtures.prefill(), host: "mini", modelName: "llama3.3:70b")], true),
+            ("compact-multi-unreachable", [Fixtures.idle(), Fixtures.remote(Fixtures.generating()), Fixtures.remote(.unreachable, host: "mini")], true),
+        ]
         for scheme in [ColorScheme.light, .dark] {
             for (name, fixture, compact) in states {
-                var model = fixture
-                if model.remote?.problem == nil {
-                    var presenter = DisplayPresenter()
-                    model.display = presenter.present(model)
-                }
-                render(model, compact: compact, scheme: scheme, to: directory, name: name)
+                render([presented(fixture)], compact: compact, scheme: scheme, to: directory, name: name)
+            }
+            for (name, fixtures, compact) in watching {
+                render(fixtures.map(presented), compact: compact, scheme: scheme, to: directory, name: name)
             }
         }
         renderMenuBar(to: directory.appendingPathComponent("menubar.png"))
@@ -179,7 +185,7 @@ enum Renderer {
             let monitor = Monitor()
             monitor.start()
             RunLoop.main.run(until: Date().addingTimeInterval(9))
-            render(monitor.model, compact: false, scheme: .dark, to: directory, name: "live")
+            render([monitor.model], compact: false, scheme: .dark, to: directory, name: "live")
             print("live phase: \(monitor.model.snapshot.phase.rawValue)")
             print("live tps: \(monitor.model.snapshot.liveTPS.map(Format.tps) ?? "none")")
             print("live generated: \(monitor.model.snapshot.generatedTokens ?? -1)")
@@ -190,11 +196,22 @@ enum Renderer {
         }
     }
 
+    /// A placeholder for a Mac that can't be reached already says what to show.
+    private static func presented(_ fixture: MeterViewModel) -> MeterViewModel {
+        guard fixture.remote?.problem == nil else { return fixture }
+        var model = fixture
+        var presenter = DisplayPresenter()
+        model.display = presenter.present(model)
+        return model
+    }
+
     private static func render(
-        _ model: MeterViewModel, compact: Bool, scheme: ColorScheme, to directory: URL, name: String
+        _ models: [MeterViewModel], compact: Bool, scheme: ColorScheme, to directory: URL, name: String
     ) {
         let renderer = ImageRenderer(
-            content: MeterContent(model: model, compact: compact).environment(\.colorScheme, scheme))
+            content: MeterBoard(models: models, compact: compact, localHost: "macbook")
+                .fixedSize()
+                .environment(\.colorScheme, scheme))
         renderer.scale = 2
         guard let image = renderer.cgImage else {
             print("render failed: \(name)")
@@ -258,22 +275,24 @@ enum Renderer {
 enum SelfTest {
     static func schedule(
         directory: URL, seconds: Double, unloadModel: String?, hub: MeterHub, panel: NSPanel,
-        statusItem: NSStatusItem, menu: @escaping () -> [String]
+        statusItem: NSStatusItem, menu: @escaping () -> [String], setOnTop: @escaping (Bool) -> Void
     ) {
         let monitor = hub.monitor
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var trace = "seconds,snapshot,display,text,dimmed,liveTPS,panelHeight,footprintMB,task,promptFraction,remote\n"
         let start = Date()
         let forward = hub.onUpdate
-        hub.onUpdate = { model in
-            forward?(model)
+        hub.onUpdate = {
+            forward?()
+            let model = hub.primary
             let elapsed = String(format: "%.2f", Date().timeIntervalSince(start))
             let tps = model.snapshot.liveTPS.map { String(format: "%.1f", $0) } ?? ""
             let display = model.display
             trace += "\(elapsed),\(model.snapshot.phase.rawValue),\(display.displayPhase.rawValue),"
                 + "\(display.text ?? ""),\(display.textDimmed),\(tps),\(Int(panel.frame.height)),\(footprintMegabytes()),"
                 + "\(model.snapshot.task.map(String.init) ?? ""),\(model.snapshot.promptFraction.map { String(format: "%.4f", $0) } ?? ""),"
-                + "\(model.remote.map { "\($0.host):\($0.status)" } ?? "local")\n"
+                + hub.models.map { "\($0.remote?.host ?? "local"):\($0.remote.map { "\($0.status)" } ?? "ok")" }
+                .joined(separator: ";") + "\n"
         }
 
         Task { @MainActor in
@@ -307,6 +326,17 @@ enum SelfTest {
             let shownByClick = panel.isVisible
             UserDefaults.standard.set(startedCompact, forKey: "compact")
             try? await Task.sleep(for: .seconds(1))
+            // The menu's on-top item, without saving the change.
+            let startedOnTop = panel.level == .floating
+            var onTopToggle: [String: Any] = ["startedOnTop": startedOnTop]
+            setOnTop(!startedOnTop)
+            onTopToggle["flippedLevel"] = panel.level.rawValue
+            onTopToggle["flippedFloating"] = panel.isFloatingPanel
+            onTopToggle["menuWhileFlipped"] = menu().filter { $0.contains("on Top") }
+            setOnTop(startedOnTop)
+            onTopToggle["restoredLevel"] = panel.level.rawValue
+            onTopToggle["menuRestored"] = menu().filter { $0.contains("on Top") }
+
             // The menu's sharing item, without saving the change.
             var sharingToggle: [String: Any] = [:]
             if hub.isSharing {
@@ -323,19 +353,26 @@ enum SelfTest {
                 ]
             }
             var unloadResult: [String: Any] = [:]
-            if let unloadModel, hub.source.isLocal {
+            if let unloadModel, hub.sources == [.local] {
                 unloadResult = await exerciseUnload(unloadModel, monitor: monitor, panel: panel, directory: directory)
             }
 
             let report: [String: Any] = [
                 "unloadTest": unloadResult,
                 "sharingToggle": sharingToggle,
+                "onTopToggle": onTopToggle,
+                "normalLevel": NSWindow.Level.normal.rawValue,
                 "menu": menu(),
-                "source": hub.source.storageValue,
-                "shownHost": hub.model.remote?.host ?? "this Mac",
-                "remoteStatus": hub.model.remote.map { String(describing: $0.status) } ?? "local",
-                "shownPhase": hub.model.display.displayPhase.rawValue,
-                "shownModel": hub.model.models.first?.name ?? "none",
+                "sources": hub.sources.map(\.storageValue),
+                "sections": hub.models.map { model -> [String: String] in
+                    [
+                        "host": model.remote?.host ?? "this Mac",
+                        "status": model.remote.map { String(describing: $0.status) } ?? "local",
+                        "phase": model.display.displayPhase.rawValue,
+                        "model": model.models.first?.name ?? "none",
+                    ]
+                },
+                "primaryHost": hub.primary.remote?.host ?? "this Mac",
                 "peers": hub.peers,
                 "sharing": hub.isSharing,
                 "sharingStatus": hub.sharingStatus ?? "off",
@@ -349,6 +386,7 @@ enum SelfTest {
                 "joinsAllSpaces": panel.collectionBehavior.contains(.canJoinAllSpaces),
                 "overFullScreen": panel.collectionBehavior.contains(.fullScreenAuxiliary),
                 "expandedFrame": NSStringFromRect(expanded),
+                "screenFrame": NSStringFromRect(panel.screen?.visibleFrame ?? .zero),
                 "compactFrame": NSStringFromRect(compact),
                 "restoredFrame": NSStringFromRect(restored),
                 "topEdgeHeldInCompact": abs(expanded.maxY - compact.maxY) < 1,
@@ -358,8 +396,8 @@ enum SelfTest {
                 "statusImageSize": button?.image.map { NSStringFromSize($0.size) } ?? "none",
                 "statusAppearance": button?.effectiveAppearance.name.rawValue ?? "none",
                 "statusTooltip": button?.toolTip ?? "",
-                "requestsSeen": hub.model.stats.requests,
-                "lastRequestTPS": hub.model.requests.first?.generationTPS ?? -1,
+                "requestsSeen": hub.primary.stats.requests,
+                "lastRequestTPS": hub.primary.requests.first?.generationTPS ?? -1,
             ]
             if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
                 try? data.write(to: directory.appendingPathComponent("report.json"))

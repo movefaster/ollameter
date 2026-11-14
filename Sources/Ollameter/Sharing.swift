@@ -7,11 +7,11 @@ enum Sharing {
     static let serviceType = "_ollameter._tcp"
 
     /// The Mac's short local name, such as `studio` for `studio.local`.
-    static var hostName: String {
+    static let hostName: String = {
         if let name = SCDynamicStoreCopyLocalHostName(nil) as String?, !name.isEmpty { return name }
         let name = ProcessInfo.processInfo.hostName
         return name.hasSuffix(".local") ? String(name.dropLast(".local".count)) : name
-    }
+    }()
 
     static var appVersion: String? {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String

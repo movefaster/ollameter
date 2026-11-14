@@ -758,3 +758,38 @@ final class SharingTests: XCTestCase {
         XCTAssertThrowsError(try garbage.append(Data("SSH-2.0-OpenSSH\r\n\r\n".utf8)))
     }
 }
+
+final class MultipleMacsTests: XCTestCase {
+    private func model(_ phase: Phase, remote: RemoteSource.Status? = .connected) -> MeterViewModel {
+        var model = MeterViewModel()
+        model.display.displayPhase = phase
+        model.remote = remote.map { RemoteSource(host: "studio", status: $0) }
+        return model
+    }
+
+    func testOrderPutsThisMacFirstThenNames() {
+        let ordered = MeterSource.ordered([
+            .service(name: "studio"), .address(host: "10.0.0.2", port: 11480), .local, .service(name: "Mini"),
+            .service(name: "studio"),
+        ])
+        XCTAssertEqual(ordered, [.local, .address(host: "10.0.0.2", port: 11480), .service(name: "Mini"), .service(name: "studio")])
+    }
+
+    func testBusiestPrefersWorkingMacs() {
+        let models = [model(.idle), model(.generating), model(.prefill)]
+        XCTAssertEqual(MeterViewModel.busiestIndex(of: models, keeping: nil), 1)
+        XCTAssertEqual(MeterViewModel.busiestIndex(of: models, keeping: 0), 1)
+    }
+
+    func testBusiestStaysOnTheCurrentMacWhenTied() {
+        let models = [model(.generating), model(.idle), model(.generating)]
+        XCTAssertEqual(MeterViewModel.busiestIndex(of: models, keeping: 2), 2)
+    }
+
+    func testUnreachableMacsRankLowest() {
+        let unreachable = MeterViewModel.placeholder(for: RemoteSource(host: "mini", status: .unreachable))
+        let models = [unreachable, model(.offline), model(.idle)]
+        XCTAssertEqual(MeterViewModel.busiestIndex(of: models, keeping: 0), 2)
+        XCTAssertNil(MeterViewModel.busiestIndex(of: [], keeping: nil))
+    }
+}
