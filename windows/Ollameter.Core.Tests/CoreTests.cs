@@ -895,7 +895,8 @@ public class SharingTests
         var encoded = new SharedFrame("workstation", "0.4.0", model).Encoded();
         var path = Fixture("frame-from-windows.json");
         if (Environment.GetEnvironmentVariable("OLLAMETER_WRITE_FIXTURES") == "1") File.WriteAllBytes(path, [.. encoded, (byte)'\n']);
-        Assert.Equal(File.ReadAllText(path).TrimEnd('\n'), Encoding.UTF8.GetString(encoded));
+        // A Windows checkout can end the file with CRLF.
+        Assert.Equal(File.ReadAllText(path).TrimEnd('\r', '\n'), Encoding.UTF8.GetString(encoded));
     }
 
     [Fact]

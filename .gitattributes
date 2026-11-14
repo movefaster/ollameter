@@ -1,0 +1,2 @@
+# Fixtures are compared byte for byte, so they keep LF even in a Windows checkout.
+Tests/Fixtures/*.json text eol=lf
