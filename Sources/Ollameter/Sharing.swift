@@ -389,6 +389,7 @@ final class RemoteClient {
             status = .connected
             var model = frame.model
             model.remote = RemoteSource(host: frame.host, status: .connected)
+            model.platform = frame.platform
             onModel?(model)
         case .failure(.otherFormat(_, let app)):
             connection?.cancel()

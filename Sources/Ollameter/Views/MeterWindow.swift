@@ -155,7 +155,7 @@ private struct HeaderSection: View {
         switch model.remote?.status {
         case .connecting: return "Connecting"
         case .unreachable: return "Not connected"
-        case .incompatible: return "Can't read this Mac"
+        case .incompatible: return "Can't read this computer"
         case .connected, nil: break
         }
         switch model.display.displayPhase {
@@ -269,8 +269,8 @@ private struct HostLabel: View {
         }
         .help(
             heading.isLocal
-                ? "This Mac's Ollama. Right-click the menu bar icon to choose which Macs to show."
-                : "\(heading.host)'s Ollama. Right-click the menu bar icon to choose which Macs to show.")
+                ? "This Mac's Ollama. Right-click the menu bar icon to choose which computers to show."
+                : "\(heading.host)'s Ollama. Right-click the menu bar icon to choose which computers to show.")
         .accessibilityElement(children: .combine)
         .accessibilityLabel(heading.isLocal ? "\(heading.host), this Mac" : heading.host)
     }
@@ -667,6 +667,11 @@ private struct HardwareSection: View {
 
     private var hardware: HardwareSample { model.hardware }
 
+    private var vramFree: UInt64? {
+        guard let total = hardware.gpuMemoryTotal, let used = hardware.gpuMemoryInUse else { return nil }
+        return total > used ? total - used : 0
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 16) {
@@ -683,7 +688,10 @@ private struct HardwareSection: View {
             }
             HStack(alignment: .top, spacing: 8) {
                 StatTile(label: "GPU power", value: hardware.gpuPowerWatts.map { String(format: "%.1f W", $0) } ?? "–")
-                StatTile(label: "SoC die", value: hardware.dieTemperature.map { String(format: "%.0f °C", $0) } ?? "–")
+                // The labels follow the computer whose numbers these are: a PC reads its GPU, a Mac its SoC die.
+                StatTile(
+                    label: model.isFromWindows ? "GPU temp" : "SoC die",
+                    value: hardware.dieTemperature.map { String(format: "%.0f °C", $0) } ?? "–")
                 StatTile(label: "Energy", value: model.joulesPerToken.map { String(format: "%.2f J/t", $0) } ?? "–")
                 PressureTile(pressure: hardware.memoryPressure)
             }
@@ -691,7 +699,11 @@ private struct HardwareSection: View {
                 StatTile(label: "GPU memory", value: hardware.gpuMemoryInUse.map(Format.bytes) ?? "–")
                 StatTile(label: "Runner RAM", value: model.runner?.residentBytes.map(Format.bytes) ?? "–")
                 StatTile(label: "Runner CPU", value: model.runner?.cpuPercent.map { "\(Int($0))%" } ?? "–")
-                StatTile(label: "Swap used", value: hardware.swapUsed.map(Format.bytes) ?? "–")
+                if model.isFromWindows {
+                    StatTile(label: "VRAM free", value: vramFree.map(Format.bytes) ?? "–")
+                } else {
+                    StatTile(label: "Swap used", value: hardware.swapUsed.map(Format.bytes) ?? "–")
+                }
             }
         }
     }

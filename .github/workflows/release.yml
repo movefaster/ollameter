@@ -1,7 +1,7 @@
 name: Release
 
-# Pushing a tag like v0.2.0 tests, builds and publishes a release.
-# Running the workflow by hand does the same build and attaches the zip to the run instead.
+# Pushing a tag like v0.2.0 tests, builds and publishes a release with the Mac app and both Windows builds.
+# Running the workflow by hand does the same builds and attaches the zips to the run instead.
 on:
   push:
     tags: ["v*"]
@@ -11,7 +11,47 @@ permissions:
   contents: write
 
 jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Test
+        run: dotnet test windows/Ollameter.Core.Tests/Ollameter.Core.Tests.csproj
+
+      - name: Build
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $version = $env:GITHUB_REF_NAME.Substring(1)
+            $label = $version
+          } else {
+            $version = "0.0.0"
+            $label = "dev-$env:GITHUB_RUN_NUMBER"
+          }
+          foreach ($runtime in "win-x64", "win-arm64") {
+            ./windows/build.ps1 -Version $version -Runtime $runtime -Label $label
+          }
+          Get-ChildItem windows/build/*.zip | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
+            Get-Content "$($_.FullName).sha256"
+          }
+
+      - name: Attach builds
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: |
+            windows/build/*.zip
+            windows/build/*.zip.sha256
+
   release:
+    needs: windows
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
@@ -51,6 +91,13 @@ jobs:
             ${{ env.ZIP }}
             ${{ env.ZIP }}.sha256
 
+      - name: Fetch the Windows builds
+        if: github.ref_type == 'tag'
+        uses: actions/download-artifact@v8
+        with:
+          name: windows
+          path: windows-builds
+
       - name: Publish release
         if: github.ref_type == 'tag'
         env:
@@ -58,4 +105,4 @@ jobs:
         run: |
           flags=(--title "Ollameter $VERSION" --generate-notes)
           if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" "${flags[@]}" "$ZIP" "$ZIP.sha256"
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" "$ZIP" "$ZIP.sha256" windows-builds/*

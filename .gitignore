@@ -1,2 +1,6 @@
 .build/
 build/
+bin/
+obj/
+*.user
+.vs/

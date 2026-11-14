@@ -685,6 +685,43 @@ final class SharingTests: XCTestCase {
         XCTAssertEqual(frame.model.snapshot.promptTPS, .infinity)
     }
 
+    /// Tests/Fixtures holds frames both apps' tests read, so each is checked against the other's format.
+    private func fixture(_ name: String) throws -> Data {
+        let tests = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        return try Data(contentsOf: tests.appendingPathComponent("Fixtures").appendingPathComponent(name))
+    }
+
+    func testReadsAFrameFromTheWindowsApp() throws {
+        guard case .success(let frame) = SharedFrame.decode(try fixture("frame-from-windows.json")) else {
+            return XCTFail("didn't decode")
+        }
+        XCTAssertEqual(frame.host, "workstation")
+        XCTAssertEqual(frame.platform, SharedFrame.windowsPlatform)
+        XCTAssertEqual(frame.model.hardware.gpuMemoryTotal, 25_769_803_776)
+        XCTAssertEqual(frame.model.requests.count, SharedFrame.requestLimit)
+        XCTAssertEqual(frame.model.stats.requests, 14)
+        XCTAssertEqual(frame.model.stats.generation.average ?? 0, 200.0 * 1000 / 7_000, accuracy: 1e-9)
+        XCTAssertEqual(frame.model.display.heldTPS, 27)
+        var shown = frame.model
+        shown.platform = frame.platform
+        XCTAssertTrue(shown.isFromWindows)
+    }
+
+    func testReadsTheMacFrameTheWindowsTestsRead() throws {
+        guard case .success(let frame) = SharedFrame.decode(try fixture("frame-from-mac.json")) else {
+            return XCTFail("didn't decode")
+        }
+        XCTAssertNil(frame.platform)
+        XCTAssertFalse(frame.model.isFromWindows)
+        XCTAssertEqual(frame.model.stats.requests, 225)
+    }
+
+    func testFramesSayTheyComeFromAMac() throws {
+        let data = try XCTUnwrap(SharedFrame(host: "studio", app: nil, model: sampleModel()).encoded())
+        guard case .success(let frame) = SharedFrame.decode(data) else { return XCTFail("didn't decode") }
+        XCTAssertEqual(frame.platform, SharedFrame.macPlatform)
+    }
+
     func testOtherFormatIsReportedWithItsVersion() {
         let data = Data(#"{"format":2,"app":"0.9.0","host":"studio"}"#.utf8)
         XCTAssertEqual(SharedFrame.decode(data), .failure(.otherFormat(format: 2, app: "0.9.0")))

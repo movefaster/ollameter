@@ -115,16 +115,16 @@ final class StatusItemController: NSObject {
             menu.addItem(sourceItem(source))
         }
         if hub.peers.isEmpty {
-            let none = NSMenuItem(title: "No other Macs found sharing", action: nil, keyEquivalent: "")
+            let none = NSMenuItem(title: "No other computers found sharing", action: nil, keyEquivalent: "")
             none.isEnabled = false
             menu.addItem(none)
         }
-        menu.addItem(action("Other Mac…", #selector(enterAddress)))
+        menu.addItem(action("Other Computer…", #selector(enterAddress)))
         menu.addItem(.separator())
 
         let sharing = action("Share on Local Network", #selector(toggleSharing))
         sharing.state = hub.isSharing ? .on : .off
-        sharing.toolTip = "Lets other Macs on this network watch this one's stats. They can't change anything here."
+        sharing.toolTip = "Lets other computers on this network watch this Mac's stats. They can't change anything here."
         menu.addItem(sharing)
         if let status = hub.sharingStatus {
             let line = NSMenuItem(title: status, action: nil, keyEquivalent: "")
@@ -147,7 +147,7 @@ final class StatusItemController: NSObject {
         let watched = hub.sources.contains(source)
         item.state = watched ? .on : .off
         if watched, hub.sources.count == 1 {
-            item.toolTip = "Pick another Mac before turning this one off."
+            item.toolTip = "Pick another computer before turning this one off."
         }
         return item
     }
@@ -174,9 +174,9 @@ final class StatusItemController: NSObject {
         var problem: String?
         while true {
             let alert = NSAlert()
-            alert.messageText = problem ?? "Watch Another Mac"
+            alert.messageText = problem ?? "Watch Another Computer"
             alert.informativeText =
-                "Enter the name or IP address of a Mac that has Share on Local Network turned on, such as "
+                "Enter the name or IP address of a Mac or PC that has Share on Local Network turned on, such as "
                 + "studio.local or 192.168.1.20. Add a port after a colon if it isn't \(MeterSource.defaultPort)."
             let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
             field.placeholderString = "studio.local"

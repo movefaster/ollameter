@@ -88,9 +88,19 @@ enum Fixtures {
         return model
     }
 
-    static func remote(_ model: MeterViewModel, host: String = "studio", modelName: String? = nil) -> MeterViewModel {
+    static func remote(
+        _ model: MeterViewModel, host: String = "studio", modelName: String? = nil, platform: String? = nil
+    ) -> MeterViewModel {
         var model = model
         model.remote = RemoteSource(host: host, status: .connected)
+        model.platform = platform
+        if platform == SharedFrame.windowsPlatform {
+            // A PC's GPU has memory of its own, and Windows doesn't report swap.
+            model.hardware.gpuMemoryInUse = 21_474_836_480
+            model.hardware.gpuMemoryTotal = 25_769_803_776
+            model.hardware.gpuPowerWatts = 312.4
+            model.hardware.swapUsed = nil
+        }
         if let modelName, !model.models.isEmpty { model.models[0].name = modelName }
         return model
     }
@@ -164,12 +174,13 @@ enum Renderer {
             ("compact-remote-unreachable", Fixtures.remote(.unreachable), true),
             ("compact-remote-incompatible", Fixtures.remote(.incompatible(app: "0.3.0")), true),
         ]
-        // Several Macs at once: this one, a busy one, and a third in various states.
+        // Several computers at once: this Mac, a busy one, and a third in various states. Mixed has a PC too.
         let watching: [(String, [MeterViewModel], Bool)] = [
             ("multi", [Fixtures.idle(), Fixtures.remote(Fixtures.generating()), Fixtures.remote(Fixtures.prefill(), host: "mini", modelName: "llama3.3:70b")], false),
             ("multi-unreachable", [Fixtures.idle(), Fixtures.remote(Fixtures.generating()), Fixtures.remote(.unreachable, host: "mini")], false),
             ("compact-multi", [Fixtures.idle(), Fixtures.remote(Fixtures.generating()), Fixtures.remote(Fixtures.prefill(), host: "mini", modelName: "llama3.3:70b")], true),
             ("compact-multi-unreachable", [Fixtures.idle(), Fixtures.remote(Fixtures.generating()), Fixtures.remote(.unreachable, host: "mini")], true),
+            ("multi-mixed", [Fixtures.idle(), Fixtures.remote(Fixtures.generating()), Fixtures.remote(Fixtures.prefill(), host: "WORKSTATION", modelName: "gpt-oss:20b", platform: SharedFrame.windowsPlatform)], false),
         ]
         for scheme in [ColorScheme.light, .dark] {
             for (name, fixture, compact) in states {

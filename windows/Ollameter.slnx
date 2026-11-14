@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Ollameter.Core/Ollameter.Core.csproj" />
+  <Project Path="Ollameter.Core.Tests/Ollameter.Core.Tests.csproj" />
+  <Project Path="Ollameter/Ollameter.csproj" />
+</Solution>

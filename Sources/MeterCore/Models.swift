@@ -275,6 +275,8 @@ public struct HardwareSample: Equatable, Sendable, Codable {
     public var dieTemperature: Double?
     public var swapUsed: UInt64?
     public var memoryPressure: MemoryPressure?
+    /// Sent by PCs, whose GPUs have memory of their own. Macs share theirs with the system and leave it out.
+    public var gpuMemoryTotal: UInt64?
 
     public init() {}
 }
@@ -307,16 +309,23 @@ public struct MeterViewModel: Equatable, Sendable, Codable {
     public var unload = UnloadState.ready
     public var tpsHistory: [Double] = []
     public var gpuHistory: [Double] = []
-    /// Set when the numbers come from another Mac rather than this one.
+    /// Set when the numbers come from another computer rather than this one.
     public var remote: RemoteSource?
+    /// What the computer the numbers come from runs, from its frames. Nil for this Mac and for Macs running
+    /// versions of Ollameter that didn't say.
+    public var platform: String?
 
     public init() {}
 
-    // The unload button and the remote source belong to the Mac showing the window, so they aren't shared.
+    // The unload button, the remote source and the platform belong to the computer showing the window, or come
+    // with the frame, so they aren't part of the model that's shared.
     private enum CodingKeys: String, CodingKey {
         case now, snapshot, display, stats, requests, notices, models, version, hardware, runner, promptCache
         case tpsHistory, gpuHistory
     }
+
+    /// A PC reads its GPU's own temperature and memory, where a Mac reads the SoC die and shares memory.
+    public var isFromWindows: Bool { platform == SharedFrame.windowsPlatform }
 
     /// True during a request and the short gaps between an agent's requests, when unloading would cut in.
     public var isWorking: Bool { snapshot.phase.isBusy || display.displayPhase.isBusy }

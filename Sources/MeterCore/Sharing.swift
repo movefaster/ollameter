@@ -1,11 +1,11 @@
 import Foundation
 
-/// Where the window's numbers come from: this Mac, or another Mac that shares its own.
+/// Where the window's numbers come from: this Mac, or another computer, Mac or PC, that shares its own.
 public enum MeterSource: Equatable, Hashable, Sendable {
     case local
-    /// A Mac found with Bonjour, by its advertised name.
+    /// A computer found with Bonjour, by its advertised name.
     case service(name: String)
-    /// A Mac reached by host name or IP address, for when Bonjour can't see it.
+    /// A computer reached by host name or IP address, for when Bonjour can't see it.
     case address(host: String, port: UInt16)
 
     public static let defaultPort: UInt16 = 11480
@@ -120,9 +120,11 @@ extension MeterViewModel {
     }
 }
 
-/// One update as it travels between Macs.
+/// One update as it travels between computers. The Windows app in `windows/` reads and writes the same JSON.
 public struct SharedFrame: Codable, Equatable, Sendable {
     public static let currentFormat = 1
+    public static let macPlatform = "macos"
+    public static let windowsPlatform = "windows"
     /// The window shows six recent requests. A few more leave room without sending all forty.
     public static let requestLimit = 10
 
@@ -134,12 +136,15 @@ public struct SharedFrame: Codable, Equatable, Sendable {
     public var format: Int
     public var host: String
     public var app: String?
+    /// Added after format 1 shipped, so older Macs neither send nor need it.
+    public var platform: String?
     public var model: MeterViewModel
 
-    public init(host: String, app: String?, model: MeterViewModel) {
+    public init(host: String, app: String?, model: MeterViewModel, platform: String? = SharedFrame.macPlatform) {
         format = Self.currentFormat
         self.host = host
         self.app = app
+        self.platform = platform
         var trimmed = model
         trimmed.requests = Array(model.requests.prefix(Self.requestLimit))
         self.model = trimmed
