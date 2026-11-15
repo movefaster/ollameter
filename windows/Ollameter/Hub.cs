@@ -164,6 +164,9 @@ internal sealed class MeterHub
     {
         var ordered = MeterSource.Ordered(list);
         settings.Sources = ordered.Select(source => source.StorageValue).ToList();
+        // Where a computer was last reached only matters while it's watched.
+        foreach (var key in settings.LastEndpoints?.Keys.Except(settings.Sources).ToList() ?? [])
+            settings.LastEndpoints!.Remove(key);
         settings.Save();
         Apply(ordered);
     }

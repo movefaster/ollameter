@@ -19,6 +19,12 @@ internal sealed class Settings
     /// <summary>The window's top-left corner in physical pixels on the virtual screen.</summary>
     [JsonPropertyName("windowLeft")] public int? WindowLeft { get; set; }
     [JsonPropertyName("windowTop")] public int? WindowTop { get; set; }
+    /// <summary>
+    /// Where each computer found with Bonjour was last reached, by its <see cref="Core.MeterSource.StorageValue"/>.
+    /// Windows' Bonjour can stop answering, such as after the PC wakes from sleep, and this is how those computers are
+    /// reached meanwhile. The Mac app has no such key, since its Bonjour keeps working.
+    /// </summary>
+    [JsonPropertyName("lastEndpoints")] public Dictionary<string, KnownEndpoint>? LastEndpoints { get; set; }
 
     public static string Directory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Ollameter");
@@ -63,6 +69,17 @@ internal sealed class Settings
         {
         }
     }
+}
+
+/// <summary>A host name and port that Bonjour gave for a computer, and the addresses it had then.</summary>
+internal sealed record KnownEndpoint(
+    [property: JsonPropertyName("host")] string Host,
+    [property: JsonPropertyName("port")] ushort Port,
+    [property: JsonPropertyName("addresses")] List<string> Addresses)
+{
+    public bool SameAs(KnownEndpoint other) =>
+        string.Equals(Host, other.Host, StringComparison.OrdinalIgnoreCase) && Port == other.Port
+        && Addresses.SequenceEqual(other.Addresses);
 }
 
 /// <summary>Starting with Windows, through the current user's Run key.</summary>

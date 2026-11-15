@@ -1,5 +1,6 @@
 using System.IO;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
@@ -305,11 +306,18 @@ internal sealed class ShareServer
 internal sealed class RemoteClient
 {
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan FirstFrameLimit = TimeSpan.FromSeconds(8);
+    /// <summary>How long Bonjour gets when there's somewhere else to try. Working, it answers well inside this.</summary>
+    private static readonly TimeSpan QuickResolveTimeout = TimeSpan.FromSeconds(3);
+    /// <summary>A <c>.local</c> name that nobody answers for takes Windows under 3 seconds to give up on.</summary>
+    private static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(3);
+    /// <summary>Long enough for a Bonjour lookup that doesn't answer, then a name lookup and a connection.</summary>
+    private static readonly TimeSpan FirstFrameLimit = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan StallLimit = TimeSpan.FromSeconds(6);
     private static readonly double[] RetryDelays = [1, 2, 4, 8, 15];
     private const double IncompatibleRetry = 60;
 
+    private readonly Settings settings = Settings.Current;
+    private readonly Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
     private readonly DispatcherTimer watchdog;
     private string host;
     private int failures;
@@ -341,16 +349,30 @@ internal sealed class RemoteClient
         Report(RemoteStatus.Connecting);
         Connect();
         watchdog.Start();
+        NetworkChange.NetworkAddressChanged += NetworkChanged;
     }
 
     public void Stop()
     {
         stopped = true;
+        NetworkChange.NetworkAddressChanged -= NetworkChanged;
         watchdog.Stop();
         retry?.Cancel();
         attempt?.Cancel();
         attempt = null;
     }
+
+    /// <summary>
+    /// Waking from sleep or joining a network changes this PC's addresses. A client waiting to try again tries at
+    /// once, rather than sitting out a delay that grew while the network was down.
+    /// </summary>
+    private void NetworkChanged(object? sender, EventArgs e) => dispatcher.BeginInvoke(() =>
+    {
+        if (stopped || attempt is not null || Status.Kind != RemoteStatusKind.Unreachable) return;
+        failures = 0;
+        retry?.Cancel();
+        Connect();
+    });
 
     private bool IsFresh => DateTime.UtcNow - lastFrame <= StallLimit;
 
@@ -383,22 +405,15 @@ internal sealed class RemoteClient
         client.Client.DualMode = true;
         try
         {
-            using (var connecting = CancellationTokenSource.CreateLinkedTokenSource(token))
+            if (Source.Kind == MeterSourceKind.Service)
             {
+                await ConnectToService(client, token);
+            }
+            else
+            {
+                using var connecting = CancellationTokenSource.CreateLinkedTokenSource(token);
                 connecting.CancelAfter(ConnectTimeout);
-                if (Source.Kind == MeterSourceKind.Service)
-                {
-                    var endpoint = await Dnssd.Resolve(Source.Name, ConnectTimeout);
-                    if (endpoint is not { } found) throw new SocketException((int)SocketError.HostNotFound);
-                    if (found.Addresses.Length > 0)
-                        await client.ConnectAsync(found.Addresses.Select(Mapped).ToArray(), found.Port, connecting.Token);
-                    else
-                        await client.ConnectAsync(found.Host, found.Port, connecting.Token);
-                }
-                else
-                {
-                    await client.ConnectAsync(Source.Name, Source.Port, connecting.Token);
-                }
+                await client.ConnectAsync(Source.Name, Source.Port, connecting.Token);
             }
             var stream = client.GetStream();
             var request = $"GET /v1/events HTTP/1.1\r\nHost: {Source.DisplayName}\r\nAccept: text/event-stream\r\n\r\n";
@@ -426,6 +441,76 @@ internal sealed class RemoteClient
         {
         }
         if (attempt == current) Fail();
+    }
+
+    /// <summary>
+    /// Bonjour says where the computer is sharing. Windows' Bonjour can stop answering for good, such as after the PC
+    /// wakes from sleep, while plain lookups of <c>.local</c> names keep working. So without an answer, the host and
+    /// port Bonjour gave last time are tried, then the addresses they had. With nothing from last time, it tries the
+    /// computer's own name, which both apps advertise under, on the usual port.
+    /// </summary>
+    private async Task ConnectToService(TcpClient client, CancellationToken token)
+    {
+        var fallback = Remembered() ?? Guessed();
+        var found = await Dnssd.Resolve(Source.Name, fallback is null ? ConnectTimeout : QuickResolveTimeout);
+        token.ThrowIfCancellationRequested();
+        if (found is { } endpoint)
+        {
+            Remember(endpoint);
+            using var connecting = CancellationTokenSource.CreateLinkedTokenSource(token);
+            connecting.CancelAfter(ConnectTimeout);
+            if (endpoint.Addresses.Length > 0)
+                await client.ConnectAsync(endpoint.Addresses.Select(Mapped).ToArray(), endpoint.Port, connecting.Token);
+            else
+                await client.ConnectAsync(endpoint.Host, endpoint.Port, connecting.Token);
+            return;
+        }
+        if (fallback is not { } known) throw new SocketException((int)SocketError.HostNotFound);
+        // The name comes first, in case the computer's address has changed since.
+        IPAddress[] current = [];
+        using (var lookup = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            lookup.CancelAfter(LookupTimeout);
+            try { current = await Dns.GetHostAddressesAsync(known.Host, lookup.Token); }
+            catch (Exception exception) when (exception is SocketException
+                || (exception is OperationCanceledException && !token.IsCancellationRequested))
+            {
+            }
+        }
+        token.ThrowIfCancellationRequested();
+        var addresses = current.Concat(known.Addresses).Distinct().Select(Mapped).ToArray();
+        if (addresses.Length == 0) throw new SocketException((int)SocketError.HostNotFound);
+        using (var connecting = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            connecting.CancelAfter(ConnectTimeout);
+            await client.ConnectAsync(addresses, known.Port, connecting.Token);
+        }
+    }
+
+    private Dnssd.Endpoint? Remembered()
+    {
+        if (settings.LastEndpoints?.GetValueOrDefault(Source.StorageValue) is not { } known) return null;
+        var addresses = known.Addresses.Select(text => IPAddress.TryParse(text, out var address) ? address : null)
+            .OfType<IPAddress>().ToArray();
+        return new Dnssd.Endpoint(known.Host, known.Port, addresses);
+    }
+
+    private void Remember(Dnssd.Endpoint endpoint)
+    {
+        var known = new KnownEndpoint(endpoint.Host, endpoint.Port, endpoint.Addresses.Select(address => address.ToString()).ToList());
+        var all = settings.LastEndpoints ??= [];
+        if (all.GetValueOrDefault(Source.StorageValue) is { } old && old.SameAs(known)) return;
+        all[Source.StorageValue] = known;
+        settings.Save();
+    }
+
+    /// <summary>A Bonjour name that's also a valid host name, as a computer's own name is, is worth a try as one.</summary>
+    private Dnssd.Endpoint? Guessed()
+    {
+        var name = Source.Name;
+        var isLabel = name.Length is > 0 and <= 63 && name[0] != '-' && name[^1] != '-'
+            && name.All(character => char.IsAsciiLetterOrDigit(character) || character == '-');
+        return isLabel ? new Dnssd.Endpoint($"{name}.local", MeterSource.DefaultPort, []) : null;
     }
 
     /// <summary>A dual-stack socket reaches IPv4 addresses through their mapped IPv6 form.</summary>
